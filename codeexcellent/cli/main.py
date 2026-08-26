@@ -196,6 +196,8 @@ def _print_benchmark_report(report) -> None:
             line += f"  | validated={'yes' if r.validated else 'no (' + (r.validation_message or '') + ')'}"
         if r.raw_cost_usd is not None:
             line += f"  | raw: cost=${r.raw_cost_usd} success={r.raw_success}"
+            if r.raw_validated is not None:
+                line += f" validated={'yes' if r.raw_validated else 'no'}"
         print(line)
 
     totals = report.totals()
@@ -227,9 +229,14 @@ def _print_benchmark_report(report) -> None:
     compare = report.compare_totals()
     if compare:
         _print_header("CodeExcellent vs raw Claude (A/B)")
-        print(f"CodeExcellent total cost: ${compare['codeexcellent_total_cost_usd']}")
-        print(f"Raw Claude total cost:    ${compare['raw_total_cost_usd']}")
+        print(f"CodeExcellent total cost: ${compare['codeexcellent_total_cost_usd']}  |  avg duration: {compare['codeexcellent_avg_duration_ms']:.0f}ms")
+        print(f"Raw Claude total cost:    ${compare['raw_total_cost_usd']}  |  avg duration: {compare['raw_avg_duration_ms']:.0f}ms")
         print(f"CodeExcellent avg calls per task: {compare['codeexcellent_avg_calls']}")
+        if "validated_tasks" in compare:
+            print(
+                f"Validated pass rate -- CodeExcellent: {compare['codeexcellent_validated_pass_rate'] * 100:.0f}%  "
+                f"vs raw Claude: {compare['raw_validated_pass_rate'] * 100:.0f}%  ({compare['validated_tasks']} task(s) with an automated check)"
+            )
 
     if report.mode == "mock":
         print("\nNote: mock mode validates CodeExcellent's own decisions (difficulty/strategy/budget/call count) "

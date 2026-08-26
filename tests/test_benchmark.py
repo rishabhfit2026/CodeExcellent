@@ -173,6 +173,40 @@ def test_compare_mode_runs_codeexcellent_and_raw_in_separate_directories(monkeyp
     assert report.results[0].raw_cost_usd == 0.05
 
 
+def test_compare_mode_validates_the_raw_run_output_too(monkeypatch):
+    # The raw-Claude side must be checked with the SAME validate() function
+    # as the CodeExcellent side, on its own separate directory -- otherwise
+    # "validated correctness" can't actually be compared between the two.
+    def _fake_run_raw_writes_correct_fix(request, root, timeout_seconds=300):
+        (Path(root) / "greet.py").write_text('def greet(name):\n    return "Hello, " + name\n')
+        return True, 0.03, 400
+
+    monkeypatch.setattr(runner, "run_raw", _fake_run_raw_writes_correct_fix)
+    report = runner.run_suite(CONFIG, MockBenchmarkEngine, "live", tasks=[_rename_task()], compare=True)
+    result = report.results[0]
+
+    assert result.raw_validated is True
+    assert result.raw_validation_message
+    # The mock CodeExcellent engine doesn't make a real fix, so the two
+    # sides must be able to disagree -- proving they're checked independently.
+    assert result.validated is False
+
+
+def test_compare_totals_reports_both_sides_validated_pass_rate(monkeypatch):
+    def _fake_run_raw_fails(request, root, timeout_seconds=300):
+        return True, 0.03, 400  # doesn't touch greet.py -- validate() will fail
+
+    monkeypatch.setattr(runner, "run_raw", _fake_run_raw_fails)
+    report = runner.run_suite(
+        CONFIG, _CorrectFixEngine, "live", tasks=[_rename_task()], compare=True,
+    )
+    compare = report.compare_totals()
+
+    assert compare["validated_tasks"] == 1
+    assert compare["codeexcellent_validated_pass_rate"] == 1.0  # _CorrectFixEngine gets it right
+    assert compare["raw_validated_pass_rate"] == 0.0  # the stub raw run never touched the file
+
+
 # --- phase 10/11: metrics and report shape -----------------------------------
 
 def test_benchmark_result_captures_all_phase_10_metric_categories():

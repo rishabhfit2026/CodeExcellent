@@ -60,6 +60,8 @@ class BenchmarkResult:
     raw_cost_usd: float | None = None
     raw_duration_ms: int | None = None
     raw_success: bool | None = None
+    raw_validated: bool | None = None  # CORRECTNESS (raw side): same validate() run against the raw-Claude output
+    raw_validation_message: str | None = None
 
 
 @dataclass
@@ -126,12 +128,24 @@ class BenchmarkReport:
         if not with_raw:
             return None
         n = len(with_raw)
-        return {
+        totals = {
             "tasks": n,
             "codeexcellent_total_cost_usd": round(sum(r.cost_usd for r in with_raw), 4),
             "raw_total_cost_usd": round(sum(r.raw_cost_usd for r in with_raw), 4),
             "codeexcellent_avg_calls": round(sum(r.claude_calls for r in with_raw) / n, 2),
+            "codeexcellent_avg_duration_ms": round(sum(r.duration_ms for r in with_raw) / n, 1),
+            "raw_avg_duration_ms": round(sum(r.raw_duration_ms or 0 for r in with_raw) / n, 1),
         }
+        # Validated pass rate only over tasks that actually have a
+        # validate() -- same "don't average in a metric that doesn't apply"
+        # rule as totals()/by_difficulty().
+        both_validated = [r for r in with_raw if r.validated is not None and r.raw_validated is not None]
+        if both_validated:
+            m = len(both_validated)
+            totals["validated_tasks"] = m
+            totals["codeexcellent_validated_pass_rate"] = round(sum(1 for r in both_validated if r.validated) / m, 2)
+            totals["raw_validated_pass_rate"] = round(sum(1 for r in both_validated if r.raw_validated) / m, 2)
+        return totals
 
 
 def _init_fixture_repo(task: BenchmarkTask, tmp_dir: Path) -> None:
@@ -227,6 +241,12 @@ def run_suite(
                     result.raw_success = success
                     result.raw_cost_usd = cost
                     result.raw_duration_ms = duration_ms or int((time.time() - start) * 1000)
+
+                    if task.validate is not None:
+                        try:
+                            result.raw_validated, result.raw_validation_message = task.validate(raw_path)
+                        except Exception as exc:
+                            result.raw_validated, result.raw_validation_message = False, f"validation check raised {exc!r}"
 
             results.append(result)
 
