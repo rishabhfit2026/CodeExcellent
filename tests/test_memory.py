@@ -51,3 +51,26 @@ def test_legacy_schema_gets_new_columns_added(tmp_path):
     assert len(rows) == 1
     assert rows[0]["request"] == "old row"
     assert rows[0]["fingerprint_key"] is None  # additive column, no backfill for pre-existing rows
+    assert rows[0]["tests_ran"] is None  # phase-7 observability columns are additive too
+
+
+def test_observability_fields_are_recorded(tmp_path):
+    memory.record(
+        str(tmp_path),
+        memory.TaskRecord(
+            created_at="2026-01-01T00:00:00", request="add tests", predicted_difficulty=4.0, band="medium",
+            mode="lightweight_plan_implement_test", status="COMPLETE", cost_usd=0.10, duration_ms=2000,
+            claude_calls=1, retries=0, files_changed=2, quality_score=9.0, fingerprint_key="fp",
+            fingerprint_category="small_change", fingerprint_repo_type="python", fingerprint_scope="small",
+            fingerprint_risk="low", confidence=0.8, quality_level="basic", outcome_class="success",
+            observed_difficulty=3.0, difficulty_error=-1.0, planning_used=True,
+            tests_ran=True, tests_passed=8, tests_failed=1,
+        ),
+    )
+
+    rows = memory.recent(str(tmp_path))
+    assert len(rows) == 1
+    assert rows[0]["planning_used"] == 1
+    assert rows[0]["tests_ran"] == 1
+    assert rows[0]["tests_passed"] == 8
+    assert rows[0]["tests_failed"] == 1

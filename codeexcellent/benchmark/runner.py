@@ -42,6 +42,8 @@ class BenchmarkResult:
     raw_cost_usd: float | None = None
     raw_duration_ms: int | None = None
     raw_success: bool | None = None
+    validated: bool | None = None  # None = task has no automated validate() check
+    validation_message: str | None = None
 
 
 @dataclass
@@ -51,7 +53,8 @@ class BenchmarkReport:
 
     def totals(self) -> dict:
         n = len(self.results) or 1
-        return {
+        validated_results = [r for r in self.results if r.validated is not None]
+        totals = {
             "tasks": len(self.results),
             "success_rate": round(sum(1 for r in self.results if r.status == "COMPLETE") / n, 2),
             "avg_claude_calls": round(sum(r.claude_calls for r in self.results) / n, 2),
@@ -59,6 +62,10 @@ class BenchmarkReport:
             "total_cost_usd": round(sum(r.cost_usd for r in self.results), 4),
             "avg_quality": round(sum(r.quality_score or 0 for r in self.results) / n, 2),
         }
+        if validated_results:
+            totals["validated_tasks"] = len(validated_results)
+            totals["validated_pass_rate"] = round(sum(1 for r in validated_results if r.validated) / len(validated_results), 2)
+        return totals
 
     def compare_totals(self) -> dict | None:
         with_raw = [r for r in self.results if r.raw_cost_usd is not None]
@@ -134,6 +141,12 @@ def run_suite(
                 claude_calls=len(report.attempts), cost_usd=report.total_cost_usd,
                 duration_ms=report.total_duration_ms,
             )
+
+            if task.validate is not None:
+                try:
+                    result.validated, result.validation_message = task.validate(tmp_path)
+                except OSError as exc:
+                    result.validated, result.validation_message = False, f"validation check itself failed: {exc}"
 
             if compare and mode == "live":
                 with tempfile.TemporaryDirectory(prefix="codeexcellent-bench-raw-") as raw_tmp:

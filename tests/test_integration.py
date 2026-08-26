@@ -3,10 +3,13 @@ subscription/API access is required (section 28).
 """
 from pathlib import Path
 
+from unittest.mock import patch
+
 from codeexcellent.claude.engine import CodingEngine
 from codeexcellent.config.settings import load_config
-from codeexcellent.core.engine import run
-from codeexcellent.core.models import Budget, ClaudeCallResult
+from codeexcellent.core import engine as engine_module
+from codeexcellent.core.engine import plan, run
+from codeexcellent.core.models import Budget, ClaudeCallResult, SuiteRunResult
 
 CONFIG = load_config()
 
@@ -80,3 +83,48 @@ def test_execution_recorded_in_history(tmp_path):
     rows = memory.recent(str(tmp_path))
     assert len(rows) == 1
     assert rows[0]["status"] == "COMPLETE"
+
+
+def test_passing_a_precomputed_plan_skips_recomputing_it(tmp_path):
+    # A caller that already displayed the analysis (e.g. the interactive CLI)
+    # should not pay for a second repo scan + adaptive-history lookup.
+    engine = ScriptedEngine([("output.py", _ok_call())])
+    precomputed = plan("Rename userName to username.", str(tmp_path), CONFIG)
+
+    with patch.object(engine_module, "plan", wraps=engine_module.plan) as spy_plan:
+        report = run("Rename userName to username.", str(tmp_path), CONFIG, engine, planned=precomputed)
+
+    spy_plan.assert_not_called()
+    assert report.status == "COMPLETE"
+    assert report.difficulty is precomputed.difficulty
+
+
+def test_omitting_planned_still_computes_it_internally(tmp_path):
+    # Backward compatibility: existing callers that don't pass `planned`
+    # (benchmark runner, direct API use) must behave exactly as before.
+    engine = ScriptedEngine([("output.py", _ok_call())])
+
+    with patch.object(engine_module, "plan", wraps=engine_module.plan) as spy_plan:
+        report = run("Rename userName to username.", str(tmp_path), CONFIG, engine)
+
+    spy_plan.assert_called_once()
+    assert report.status == "COMPLETE"
+
+
+def test_observability_fields_flow_from_test_results_into_history(tmp_path):
+    from codeexcellent.core import memory, test_runner
+
+    # "tests" in the request text pushes testing_signal above the threshold
+    # that makes difficulty_scorer set testing_required=True (no mocking of
+    # orchestration logic needed -- this is real heuristic behavior).
+    engine = ScriptedEngine([("output.py", _ok_call())])
+    fake_tests = SuiteRunResult(ran=True, passed=7, failed=1, command="pytest -q", success=False)
+
+    with patch.object(test_runner, "run", return_value=fake_tests):
+        report = run("Add unit tests for the calculator module", str(tmp_path), CONFIG, engine)
+
+    assert report.difficulty.testing_required is True
+    rows = memory.recent(str(tmp_path))
+    assert rows[0]["tests_ran"] == 1
+    assert rows[0]["tests_passed"] == 7
+    assert rows[0]["tests_failed"] == 1

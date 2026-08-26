@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -10,9 +11,16 @@ from codeexcellent.config.settings import load_config
 from codeexcellent.core import memory, repository
 from codeexcellent.core.engine import plan as plan_task
 from codeexcellent.core.engine import run as run_engine
-from codeexcellent.core.models import ExecutionReport, PlanResult
+from codeexcellent.core.models import ExecutionMode, ExecutionReport, PlanResult
 
 _BANNER = "CodeExcellent"
+
+_MODE_LABELS = {
+    ExecutionMode.DIRECT: "Direct",
+    ExecutionMode.LIGHTWEIGHT: "Lightweight planning",
+    ExecutionMode.FULL: "Full planning + review",
+    ExecutionMode.REVIEW_REQUIRED: "Direct + mandatory review",
+}
 
 
 def _print_header(title: str) -> None:
@@ -181,6 +189,8 @@ def _print_benchmark_report(report) -> None:
             f"[{r.category:<10}] {r.task_id:<32} difficulty={r.predicted_difficulty:<5} "
             f"mode={r.mode:<24} status={r.status:<10} calls={r.claude_calls} cost=${r.cost_usd}"
         )
+        if r.validated is not None:
+            line += f"  | validated={'yes' if r.validated else 'no (' + (r.validation_message or '') + ')'}"
         if r.raw_cost_usd is not None:
             line += f"  | raw: cost=${r.raw_cost_usd} success={r.raw_success}"
         print(line)
@@ -193,6 +203,8 @@ def _print_benchmark_report(report) -> None:
     print(f"Avg cost: ${totals['avg_cost_usd']}")
     print(f"Total cost: ${totals['total_cost_usd']}")
     print(f"Avg quality: {totals['avg_quality']}/10")
+    if "validated_tasks" in totals:
+        print(f"Validated pass rate: {totals['validated_pass_rate'] * 100:.0f}% ({totals['validated_tasks']} task(s) with an automated check)")
 
     compare = report.compare_totals()
     if compare:
@@ -203,7 +215,7 @@ def _print_benchmark_report(report) -> None:
 
     if report.mode == "mock":
         print("\nNote: mock mode validates CodeExcellent's own decisions (difficulty/strategy/budget/call count) "
-              "at zero cost. It does not judge real code quality -- use --live for that.")
+              "at zero cost. It does not judge real code quality or pass any 'validated' checks -- use --live for that.")
 
 
 def cmd_benchmark(args: argparse.Namespace) -> int:
@@ -291,15 +303,77 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mark(ok: bool) -> str:
+    return "✓" if ok else "✗"
+
+
+def _print_startup_banner(root: str, config: dict, engine: ClaudeRunner) -> None:
+    available, _ = engine.is_available()
+    repo = repository.analyze(root, config)
+    repo_label = Path(root).name or root
+
+    print(f"{_BANNER} v{__version__}")
+    print(f"Repository: {repo_label}")
+    print(f"Claude CLI: {_mark(available)}")
+    print(f"Git: {_mark(repo.has_git)}" + (f" ({repo.git_branch})" if repo.has_git and repo.git_branch else ""))
+    print('\nType a task, or "exit" to quit.\n')
+
+
+def _print_compact_plan(planned: PlanResult) -> None:
+    """The concise per-task summary the interactive loop shows before
+    executing (section 3) -- difficulty/risk/confidence/strategy in a
+    handful of lines, not the full multi-section report `analyze`/`run`
+    print. Full detail is always available via `codeexcellent analyze`.
+    """
+    difficulty = planned.difficulty
+    print(f"Difficulty: {difficulty.value}/10  Risk: {difficulty.risk_level.value.upper()}  Confidence: {difficulty.confidence}")
+    print(f"Strategy: {_MODE_LABELS.get(difficulty.mode, difficulty.mode.value)}")
+
+
+def _interactive_step(msg: str) -> str | None:
+    """Maps engine.run()'s internal on_step messages to short, user-facing
+    progress phrases for the interactive loop; returns None to suppress a
+    message entirely (internal reasoning/decision text belongs in `analyze`
+    /`run`'s fuller output, not in every turn of a conversation).
+    """
+    if msg.startswith("Calling Claude"):
+        # "attempt 1," (with the comma) avoids "attempt 1" matching "attempt 11".
+        return "Implementing..." if "attempt 1," in msg else "Retrying..."
+    if msg == "Running tests...":
+        return "Testing..."
+    if msg == "Running quality review...":
+        return "Reviewing..."
+    if msg == "Cancelled by user." or msg.startswith("BLOCKED"):
+        return msg
+    return None
+
+
+def _print_compact_result(report: ExecutionReport) -> None:
+    if report.status == "COMPLETE":
+        print(f"\n{_mark(True)} Task completed")
+    elif report.status == "CANCELLED":
+        print(f"\n{_mark(False)} Cancelled")
+    else:
+        print(f"\n{_mark(False)} Task {report.status.lower()}")
+
+    quality = f"{report.final_quality.score}/10" if report.final_quality else "n/a"
+    files = len(report.files_changed)
+    print(f"Quality: {quality} | Files changed: {files} | Cost: ${report.total_cost_usd}")
+    if report.final_quality and report.final_quality.issues:
+        for issue in report.final_quality.issues[:3]:
+            print(f"  - {issue}")
+
+
 def _interactive() -> int:
-    print(_BANNER)
-    print('Interactive mode. Type a task, or "exit" to quit.\n')
     root = str(Path.cwd())
     config = load_config()
     engine = ClaudeRunner(config)
+    _print_startup_banner(root, config, engine)
+
     available, detail = engine.is_available()
     if not available:
         print(f"Claude CLI is not available: {detail}", file=sys.stderr)
+        print("Run `codeexcellent doctor` for details.", file=sys.stderr)
         return 1
 
     while True:
@@ -311,10 +385,22 @@ def _interactive() -> int:
         if not prompt or prompt.lower() in ("exit", "quit"):
             return 0
 
-        _analysis_report(prompt, root, config)
-        print("\nStarting Claude...")
-        report = run_engine(prompt, root, config, engine, on_step=lambda msg: print(f"  {msg}"))
-        _print_report(report)
+        planned = plan_task(prompt, root, config)
+        if planned.blocked_reason:
+            print(f"Blocked: {planned.blocked_reason}\n")
+            continue
+
+        _print_compact_plan(planned)
+        print()
+
+        def _on_step(msg: str) -> None:
+            shown = _interactive_step(msg)
+            if shown:
+                print(f"{shown}")
+
+        report = run_engine(prompt, root, config, engine, on_step=_on_step, planned=planned)
+        _print_compact_result(report)
+        print()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -359,15 +445,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-
+def _dispatch(argv: list[str]) -> int:
     if not argv:
         return _interactive()
 
-    root_pre_parser = argparse.ArgumentParser(add_help=False)
-    root_pre_parser.add_argument("--root", default=".")
-    root_args, argv = root_pre_parser.parse_known_args(argv)
+    # --root and --debug are deliberately NOT registered on the main/sub
+    # parsers: argparse gives a shared dest a fresh default every time a
+    # (sub)parser's own parse pass starts, which silently clobbers a value
+    # already set by an enclosing parser. Extracted here instead, so both
+    # work whether they appear before or after the subcommand.
+    global_pre_parser = argparse.ArgumentParser(add_help=False)
+    global_pre_parser.add_argument("--root", default=".")
+    global_pre_parser.add_argument("--debug", action="store_true")
+    global_args, argv = global_pre_parser.parse_known_args(argv)
 
     # Bare invocation with no subcommand and no prompt-looking arg -> REPL.
     known_commands = {"run", "analyze", "doctor", "history", "config", "benchmark", "-h", "--help"}
@@ -380,11 +470,36 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
-    args.root = root_args.root
+    args.root = global_args.root
     if not getattr(args, "command", None):
         return _interactive()
 
     return args.func(args)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Never lets an unexpected exception reach the user as a raw Python
+    traceback (section 10) -- prints a one-line message and exits non-zero
+    instead, unless --debug (or $CODEEXCELLENT_DEBUG=1) is set, in which case
+    the real traceback is shown so a developer can actually diagnose it.
+    argparse's own --help/--version/usage-error exits (SystemExit) and a
+    Ctrl-C during input() (already handled inside `_interactive()`) are
+    unaffected -- this only catches what would otherwise be a crash.
+    """
+    argv = sys.argv[1:] if argv is None else argv
+    debug = "--debug" in argv or os.environ.get("CODEEXCELLENT_DEBUG") == "1"
+
+    try:
+        return _dispatch(argv)
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        if debug:
+            raise
+        print(f"\nUnexpected error: {exc}", file=sys.stderr)
+        print("Run with --debug (or set CODEEXCELLENT_DEBUG=1) for the full traceback.", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

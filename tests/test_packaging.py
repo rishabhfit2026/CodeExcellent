@@ -7,10 +7,12 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from codeexcellent import __version__
+from codeexcellent.cli import main as cli_main
 from codeexcellent.cli.main import main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -50,8 +52,22 @@ def test_installed_console_script_runs_and_reports_the_same_version():
     assert __version__ in result.stdout
 
 
+class _StubDoctorEngine:
+    """No real subprocess call -- keeps this test hermetic (no Claude
+    subscription/API access, matching the rest of the suite) and
+    deterministic (not dependent on the developer's local auth state).
+    """
+
+    def is_available(self):
+        return True, "stub 1.0.0"
+
+    def auth_status(self):
+        return {"loggedIn": True, "subscriptionType": "pro"}
+
+
 def test_doctor_runs_without_crashing_regardless_of_environment(tmp_path):
     # doctor must degrade gracefully (never raise) even in a directory with
-    # no git repo and no claude CLI signal beyond what's actually installed.
-    exit_code = main(["doctor", "--root", str(tmp_path)])
+    # no git repo.
+    with patch.object(cli_main, "ClaudeRunner", lambda config: _StubDoctorEngine()):
+        exit_code = main(["doctor", "--root", str(tmp_path)])
     assert exit_code in (0, 1)

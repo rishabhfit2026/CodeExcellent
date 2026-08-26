@@ -207,6 +207,37 @@ def _is_test_path(root_path: Path, f: Path) -> bool:
     return "test" in rel.parts or f.name.startswith("test_") or f.name.endswith(("_test.py", ".test.js", ".test.ts"))
 
 
+_SENSITIVE_EXTENSIONS = {".pem", ".key", ".p12", ".pfx", ".pgp", ".gpg", ".asc"}
+_SENSITIVE_NAMES = {
+    "id_rsa", "id_ed25519", "id_dsa", "id_ecdsa", ".npmrc", ".pypirc", ".netrc",
+    "credentials", "credentials.json", ".git-credentials",
+}
+
+
+def _is_sensitive_path(rel: str | Path) -> bool:
+    """Files that should never be selected into a Claude prompt, regardless
+    of keyword score (section 14/32): secrets, credentials, private keys.
+    A task whose wording happens to overlap a filename (e.g. "fix the
+    production config" matching ".env.production") must not pull one in.
+
+    Takes the basename via `Path.name`, not a manual "/" split -- on
+    Windows, `str(some_path)` uses backslashes, so splitting on "/" would
+    silently fail to isolate the filename for anything in a subdirectory.
+    """
+    name = Path(rel).name.lower()
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+
+    if name == ".env" or (name.startswith(".env.") and name not in (".env.example", ".env.sample", ".env.template")):
+        return True
+    if Path(name).suffix in _SENSITIVE_EXTENSIONS:
+        return True
+    if name in _SENSITIVE_NAMES or stem in _SENSITIVE_NAMES:
+        return True
+    if "secret" in name or "credential" in name:
+        return True
+    return False
+
+
 def _extract_imports(content: str) -> list[str]:
     names: list[str] = []
     for pattern in _IMPORT_PATTERNS:
@@ -239,6 +270,13 @@ def find_relevant_files(root: str, task_request: str, config: dict, max_results:
     Then pull in a small, capped set of each match's direct dependencies and
     same-named tests -- context.py preserves this ordering, so primary
     matches always outrank pulled-in dependencies within the context budget.
+
+    Files matched by `_is_sensitive_path` (.env, private keys, credential
+    stores) are excluded entirely before scoring, regardless of keyword
+    match -- e.g. a task mentioning "production" must not pull in
+    ".env.production". This only affects automatic pre-selection; Claude's
+    own Read/Glob/Grep tools can still access such a file directly if a task
+    genuinely requires it.
     """
     root_path = Path(root).resolve()
     repo_cfg = config.get("repository", {})
@@ -250,7 +288,7 @@ def find_relevant_files(root: str, task_request: str, config: dict, max_results:
     if not words:
         return []
 
-    files = _walk_files(root_path, ignored_dirs, max_files)
+    files = [f for f in _walk_files(root_path, ignored_dirs, max_files) if not _is_sensitive_path(f)]
     scored: list[tuple[float, Path]] = []
     matched_rel_lower: set[str] = set()
 

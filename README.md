@@ -1,21 +1,27 @@
 # CodeExcellent
 
-An adaptive, resource-aware orchestration layer around the Claude CLI.
-CodeExcellent does not replace Claude's reasoning or coding ability — it
-decides *when, why, and how much* of it a given task actually needs, learns
-from what actually happened, and gets out of the way.
+An adaptive coding-agent CLI built around the Claude CLI. Install it, `cd`
+into a project, and run `codeexcellent` for an interactive coding-agent
+session — CodeExcellent decides *when, why, and how much* of Claude's
+reasoning a given task actually needs, learns from what actually happened,
+and gets out of the way.
+
+The guiding principle is **quality per resource, not minimum tokens**:
+CodeExcellent is designed to use the minimum sufficient intelligence and
+validation to complete a task correctly, not to minimize resource use at
+the expense of correctness. A one-line rename gets one cheap call at low
+effort, no plan, no review. A payment-code one-liner gets a mandatory
+review even though it's short, because risk — not just difficulty — drives
+how much validation a task gets. A multi-file architecture migration gets a
+plan, a larger budget, tests, and a review pass. Every prediction is
+checked against what actually happened, and that history feeds back into
+the next prediction for a similar task.
 
 ```
 Task → estimate difficulty (heuristic + history) → forecast resources
      → select a strategy → allocate a budget → call Claude → validate
      → stop → record what actually happened
 ```
-
-A one-line rename gets one cheap call at low effort, no plan, no review. A
-payment-code one-liner gets a mandatory review even though it's short. A
-multi-file architecture migration gets a plan, a larger budget, tests, and a
-review pass. Every prediction is checked against what actually happened, and
-that history feeds back into the next prediction for a similar task.
 
 ## Why this architecture
 
@@ -100,13 +106,43 @@ want a fully clean slate.
 
 ## Usage
 
-```bash
-# Interactive mode
-codeexcellent
+The primary experience is the bare `codeexcellent` command, run from inside
+a project:
 
-# One-shot
-codeexcellent "Add pagination to the users API"
-codeexcellent run "Add pagination to the users API"
+```
+$ cd my-project
+$ codeexcellent
+
+CodeExcellent v0.2.0
+Repository: my-project
+Claude CLI: ✓
+Git: ✓ (main)
+
+Type a task, or "exit" to quit.
+
+> Fix the authentication bug
+Difficulty: 6.1/10  Risk: MEDIUM  Confidence: 0.78
+Strategy: Lightweight planning
+
+Implementing...
+Testing...
+
+✓ Task completed
+Quality: 9.0/10 | Files changed: 2 | Cost: $0.14
+```
+
+Each turn is analyzed, classified, and executed with a strategy sized to
+that specific task — you don't need to know or think about the internal
+orchestration; type what you want done. `codeexcellent doctor` (see below)
+is worth running once after install to confirm the Claude CLI and git are
+detected correctly.
+
+One-shot execution (no REPL) is also fully supported, for scripting or a
+single task:
+
+```bash
+codeexcellent "fix the login bug"
+codeexcellent run "fix the login bug"       # equivalent, explicit form
 
 # See the difficulty/strategy/budget/forecast without executing anything
 codeexcellent analyze "Migrate JWT auth to OAuth"
@@ -130,7 +166,14 @@ codeexcellent --version
 
 `--root <path>` targets a different repository (works before or after the
 subcommand). `run` accepts `-y/--yes` to skip the pre-existing-changes
-confirmation prompt.
+confirmation prompt. `--debug` (or `$CODEEXCELLENT_DEBUG=1`) shows the full
+Python traceback on an unexpected error instead of a one-line message —
+useful when filing a bug report.
+
+Interactive mode shows a condensed per-task summary (difficulty/risk/
+confidence/strategy, then short progress phrases, then a one-line result) --
+`analyze`/`run`'s fuller multi-section breakdown (reasons, budget, resource
+forecast) is always available on demand via `codeexcellent analyze "..."`.
 
 ## Execution modes
 
@@ -163,8 +206,13 @@ Every run is scored twice:
    from what actually happened: retries beyond the first call, the quality
    shortfall, and how long it took relative to budget.
 
-`codeexcellent history` shows both, plus the error between them. That
-history is also the training data for `analyzer/adaptive_estimator.py`: for
+`codeexcellent history` shows both, plus the error between them. Every row
+also records observability metadata beyond the prediction itself: strategy
+used, whether planning ran, actual resource usage (cost, duration, calls,
+retries, files changed), and test outcome (ran/passed/failed counts) — no
+source code, diffs, or file contents, only the task description and these
+metrics. That history is also the training data for
+`analyzer/adaptive_estimator.py`: for
 a task whose `TaskFingerprint` (category + repo type + scope + risk — never
 the request text or source code) matches at least `min_samples_for_blend`
 (default 3) past runs, the heuristic estimate is blended toward the observed
@@ -225,6 +273,31 @@ Claude's own resumed session (`--resume`), so a retry prompt
 (`core/retry.py`) carries only new feedback (issues found, test failures),
 not a restatement of context the session already has.
 
+## Security & privacy
+
+CodeExcellent operates locally: it shells out to the `claude` CLI (which
+handles its own auth via `claude auth login`) and reads/writes files inside
+the target repository. It never uploads repository contents anywhere on its
+own, and it never introduces a separate credential store of its own.
+
+Files that commonly hold secrets — `.env` and variants (except
+`.env.example`/`.env.sample`/`.env.template`), private keys (`.pem`, `.key`,
+`id_rsa` and friends), and credential stores (`.npmrc`, `.netrc`,
+`credentials.json`) — are excluded from automatic context selection
+entirely, regardless of keyword score, so a task like "fix the production
+config" can't accidentally pull `.env.production`'s contents into a Claude
+prompt (`core/repository.py::_is_sensitive_path`). This only affects
+*automatic* pre-selection; Claude's own Read/Glob/Grep tools can still open
+such a file directly if a task genuinely requires it — CodeExcellent isn't a
+sandbox around Claude's tool access, only around what it proactively feeds
+into the prompt.
+
+`codeexcellent doctor`'s auth check reports login status and subscription
+tier only — never the account email or org ID, even though the underlying
+`claude auth status` returns them. History (`core/memory.py`) stores task
+descriptions and outcome metadata (difficulty, cost, test pass/fail counts,
+etc.), never file contents or diffs.
+
 ## Reliability
 
 Every run reaches one of five terminal statuses: `COMPLETE`, `INCOMPLETE`
@@ -282,16 +355,25 @@ codeexcellent benchmark --live --compare   # + a raw "just call Claude directly"
 ```
 
 `codeexcellent/benchmark/tasks.py` defines 15 representative tasks, three
-each at trivial/easy/medium/hard/very_hard (section 20 of the spec this was
-built from). The default mock engine (`benchmark/mock_engine.py`) makes no
-real Claude calls — it validates CodeExcellent's own decision-making
-(difficulty, strategy, call count) across the whole suite at zero cost, but
-it does not produce correct code, so its quality scores aren't meaningful.
-`--live` runs the real thing and is the only mode whose numbers say anything
-about actual code quality or actual cost; `--compare` additionally calls
-Claude directly with no orchestration on the same fixture, for an honest A/B
-of CodeExcellent vs. "just use Claude" — never run automatically, always
-behind an explicit confirmation.
+each at trivial/easy/medium/hard/very_hard. Each `BenchmarkTask` carries a
+task description, a fixture-repo generator, and an `expected_behavior`
+string describing correct completion; a representative subset (one per
+difficulty band) also has a `validate(root) -> (passed, message)` function
+that programmatically checks the actual file contents after a run, rather
+than relying only on the heuristic quality score — e.g. the trivial-rename
+task's validator reads `greet.py` back and checks the parameter was
+genuinely renamed. Adding a `validate` to any of the remaining tasks is a
+self-contained addition to `tasks.py`; nothing else needs to change. The
+default mock engine (`benchmark/mock_engine.py`) makes no real Claude
+calls — it validates CodeExcellent's own decision-making (difficulty,
+strategy, call count) across the whole suite at zero cost, but it doesn't
+produce correct code, so its quality scores and `validated` results aren't
+meaningful (the report says so explicitly). `--live` runs the real thing
+and is the only mode whose numbers say anything about actual code quality,
+actual validation-check pass rate, or actual cost; `--compare` additionally
+calls Claude directly with no orchestration on the same fixture, for an
+honest A/B of CodeExcellent vs. "just use Claude" — never run
+automatically, always behind an explicit confirmation.
 
 A note on labels vs. reality: the benchmark task *names* ("hard_...",
 "very_hard_...") are my own subjective difficulty labels when writing the
@@ -334,18 +416,23 @@ shim on Windows is found the same way a `.exe`/`.sh` would be on Linux/macOS.
 .venv/bin/pytest -q
 ```
 
-All 80 tests run against a mocked `CodingEngine`/`subprocess.run` and a
+All 115 tests run against a mocked `CodingEngine`/`subprocess.run` and a
 temp-directory SQLite history — no Claude subscription or API access is
 required, and nothing shells out to the real `claude` binary during the
 test suite. This includes packaging tests (`tests/test_packaging.py`) that
-check the entry point, version wiring, and license file, and cross-platform
+check the entry point, version wiring, and license file; cross-platform
 executable-resolution tests (`tests/test_platform_utils.py`,
-`tests/test_test_runner.py`). Beyond the unit suite, the pipeline has also
-been verified against the real Claude CLI end-to-end (trivial and
-CRITICAL-risk tasks via `analyze`, a real `run` against a scratch repo), and
-the packaging itself has been verified by building the sdist/wheel
-(`python -m build`, `twine check`) and installing/uninstalling both into a
-throwaway virtualenv from scratch.
+`tests/test_test_runner.py`); interactive-mode tests
+(`tests/test_interactive.py`) that script stdin against a stub engine;
+top-level error-handling tests (`tests/test_error_handling.py`) proving a
+raw traceback never reaches the user outside `--debug`; and benchmark
+validation-wiring tests (`tests/test_benchmark.py`). Beyond the unit suite,
+the pipeline has also been verified against the real Claude CLI end-to-end
+(trivial and CRITICAL-risk tasks via `analyze`, a real `run` against a
+scratch repo, a full interactive-session smoke test), and the packaging
+itself has been verified by building the sdist/wheel (`python -m build`,
+`twine check`) and installing/uninstalling both into a throwaway virtualenv
+from scratch.
 
 ## Current scope / what's next
 
@@ -359,10 +446,20 @@ asks for statistical blending first, and there isn't yet enough real
 project history to justify more), and a second `CodingEngine`
 implementation to prove out the abstraction beyond Claude.
 
-Packaging (this release): PyPI-ready `pyproject.toml` with full metadata,
-an MIT license, a global `codeexcellent` command verified via a from-scratch
+Packaging (v0.2.0): PyPI-ready `pyproject.toml` with full metadata, an MIT
+license, a global `codeexcellent` command verified via a from-scratch
 build/install/uninstall cycle, `--version`, `config --init`, and explicit
-cross-platform executable resolution. None of this touched the orchestration
-logic in `core/`, `analyzer/`, `budget/`, or `quality/` — it's packaging and
-execution-mechanics work only. See [CHANGELOG.md](CHANGELOG.md) for the
-version history.
+cross-platform executable resolution.
+
+This release (v0.2.1): interactive mode is the primary UX (a startup banner,
+a concise per-turn summary instead of the full `analyze` report, `--debug`
+error handling), a real double-computation fix (`engine.run()` can now reuse
+a caller's already-computed `plan()` instead of silently redoing the repo
+scan and adaptive-history lookup), a security fix (`.env`/key/credential
+files are now excluded from automatic context selection, regardless of
+keyword match), phase-7 observability fields (`planning_used`, test pass/
+fail counts) in history, and `expected_behavior`/`validate()` fields on the
+benchmark task structure. None of this touched the difficulty/strategy/
+budget decision logic in `analyzer/`, `budget/`, or `quality/` — it's CLI
+UX, a resource-efficiency fix, and data-hygiene/observability work. See
+[CHANGELOG.md](CHANGELOG.md) for the version history.

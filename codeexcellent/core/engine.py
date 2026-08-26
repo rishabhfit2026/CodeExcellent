@@ -66,7 +66,12 @@ def _diff_text(root: str, changed_files: list[str], has_git: bool) -> str:
     return "\n\n".join(chunks)
 
 
-def _blocked_report(request: str, reason: str, difficulty=None, budget=None) -> ExecutionReport:
+def _early_exit_report(request: str, reason: str, status: str, difficulty=None, budget=None) -> ExecutionReport:
+    """Builds a report for a run that never reached the Claude-call loop --
+    blocked pre-flight (engine unavailable, repo too large) or cancelled
+    (Ctrl-C) during analysis. Neither has partial attempt data to report, so
+    this is a minimal, valid ExecutionReport rather than a crash.
+    """
     from codeexcellent.core.models import Budget, DifficultyScore, QualityLevel, RiskLevel
 
     difficulty = difficulty or DifficultyScore(
@@ -79,11 +84,15 @@ def _blocked_report(request: str, reason: str, difficulty=None, budget=None) -> 
         max_claude_calls=0, max_retries=0, timeout_seconds=0,
     )
     return ExecutionReport(
-        task=request, difficulty=difficulty, budget=budget, attempts=[], status="BLOCKED",
+        task=request, difficulty=difficulty, budget=budget, attempts=[], status=status,
         total_cost_usd=0.0, total_duration_ms=0, files_changed=[],
         final_quality=QualityResult(score=0.0, complete=False, needs_more_work=True, issues=[reason]),
         outcome_class=outcome.OutcomeClass.INFRA_FAILURE,
     )
+
+
+def _blocked_report(request: str, reason: str, difficulty=None, budget=None) -> ExecutionReport:
+    return _early_exit_report(request, reason, "BLOCKED", difficulty, budget)
 
 
 def plan(request: str, root: str, config: dict, on_step: StepCallback | None = None) -> PlanResult:
@@ -151,7 +160,19 @@ def plan(request: str, root: str, config: dict, on_step: StepCallback | None = N
     )
 
 
-def run(request: str, root: str, config: dict, engine: CodingEngine, on_step: StepCallback | None = None) -> ExecutionReport:
+def run(
+    request: str,
+    root: str,
+    config: dict,
+    engine: CodingEngine,
+    on_step: StepCallback | None = None,
+    planned: PlanResult | None = None,
+) -> ExecutionReport:
+    """Pass a `planned` from a prior `plan()` call (e.g. one the caller
+    already displayed to the user) to skip recomputing it here -- otherwise
+    `run()` computes it itself. Recomputing is not wrong, just wasteful: a
+    full repo scan + adaptive-history lookup twice per task for no reason.
+    """
     on_step = on_step or _noop
 
     available, detail = engine.is_available()
@@ -159,7 +180,12 @@ def run(request: str, root: str, config: dict, engine: CodingEngine, on_step: St
         on_step(f"BLOCKED: {detail}")
         return _blocked_report(request, f"Coding engine unavailable: {detail}")
 
-    planned = plan(request, root, config, on_step)
+    try:
+        if planned is None:
+            planned = plan(request, root, config, on_step)
+    except KeyboardInterrupt:
+        return _early_exit_report(request, "Cancelled by user during task analysis.", "CANCELLED")
+
     if planned.blocked_reason:
         return _blocked_report(request, planned.blocked_reason, planned.difficulty, planned.budget)
 
@@ -273,6 +299,8 @@ def run(request: str, root: str, config: dict, engine: CodingEngine, on_step: St
     outcome_class = outcome.classify(status, attempts, task)
     observed = outcome.observed_difficulty(outcome_class, attempts, budget, quality)
     difficulty_error = round(observed - difficulty.value, 2) if observed is not None else None
+    last_tests = attempts[-1].tests if attempts else None
+    planning_used = difficulty.mode in (ExecutionMode.LIGHTWEIGHT, ExecutionMode.FULL)
 
     report = ExecutionReport(
         task=request,
@@ -319,6 +347,10 @@ def run(request: str, root: str, config: dict, engine: CodingEngine, on_step: St
             difficulty_error=difficulty_error,
             forecast_calls=forecast.expected_calls,
             forecast_basis=forecast.basis,
+            planning_used=planning_used,
+            tests_ran=bool(last_tests and last_tests.ran),
+            tests_passed=last_tests.passed if last_tests else 0,
+            tests_failed=last_tests.failed if last_tests else 0,
         ),
     )
 

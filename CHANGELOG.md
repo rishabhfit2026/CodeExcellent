@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.2.1
+
+**Interactive mode is now the primary UX** (no changes to difficulty/
+strategy/budget decision logic):
+- Bare `codeexcellent` shows a startup banner (version, repository name,
+  Claude CLI / git status) and, per turn, a concise summary (difficulty/
+  risk/confidence/strategy → short progress phrases → one-line result)
+  instead of the full multi-section `analyze`/`run` report. That fuller
+  report is unchanged and still available on demand via
+  `codeexcellent analyze "..."`.
+- `engine.run()` now accepts an optional pre-computed `plan()` result, so
+  the interactive loop (which already displays the plan) doesn't pay for a
+  second repo scan + adaptive-history lookup per turn. Callers that don't
+  pass one behave exactly as before.
+- Top-level error handling: an unexpected exception now prints one line and
+  exits non-zero instead of a raw traceback, unless `--debug` (or
+  `$CODEEXCELLENT_DEBUG=1`) is set. `KeyboardInterrupt` is now caught during
+  task analysis too, not only during the Claude-call loop.
+
+**A real security fix**: files that commonly hold secrets (`.env` and
+variants, private keys, `.npmrc`/`.netrc`/credential stores) are now
+excluded from automatic context selection entirely, regardless of keyword
+match — a task like "fix the production config" could previously
+substring-match and pull `.env.production`'s contents into the Claude
+prompt. This only affects automatic pre-selection; Claude's own tools can
+still open such a file directly if genuinely needed.
+
+**Observability (phase 7)**: history now also records `planning_used` and
+test pass/fail counts per task, additive to the existing schema.
+
+**Benchmark framework**: `BenchmarkTask` gained `expected_behavior` (set for
+all 15 tasks) and an optional `validate(root) -> (passed, message)`
+programmatic correctness check (filled in for one task per difficulty
+band), reported as `validated`/`validation_message` per result and a
+`validated_pass_rate` in the summary — a corpus of ~15 hardcoded phrases
+matching against pass/fail states isn't itself proof of anything; this is
+what closes the gap between "a file changed" and "the task was actually
+done correctly" for `--live` runs.
+
+Also fixed along the way: `--root`/`--debug` extraction, and a hermeticity
+fix to the `doctor` packaging test (it was making a real, unmocked
+`claude auth status` call, which is what the "no real Claude subscription
+required" testing claim was supposed to guarantee).
+
 ## 0.2.0
 
 **Packaging / production readiness** (no orchestration logic changed):
