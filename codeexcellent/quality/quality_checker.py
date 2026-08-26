@@ -20,6 +20,26 @@ REVIEW_JSON_SCHEMA = {
 _SCOPE_FILE_LIMITS = {"small": 4, "medium": 10, "large": 30}
 
 
+def min_pass_score_for(difficulty: DifficultyScore, config: dict) -> float:
+    """Quality-level-aware pass threshold (section 17): a typo fix and an
+    auth migration should not be held to the same bar.
+    """
+    by_level = config.get("quality", {}).get("min_pass_score_by_level", {})
+    default = config.get("quality", {}).get("min_pass_score", 7.0)
+    return float(by_level.get(difficulty.quality_level.value, default))
+
+
+def review_required(difficulty: DifficultyScore, config: dict) -> bool:
+    """Whether a structured Claude review call is warranted: either the task
+    is difficult enough that a review adds real value, or its quality level
+    makes review mandatory regardless of difficulty (section 18).
+    """
+    quality_cfg = config.get("quality", {})
+    if difficulty.quality_level.value in quality_cfg.get("mandatory_review_levels", []):
+        return True
+    return difficulty.value >= quality_cfg.get("use_claude_review_at_or_above_difficulty", 6)
+
+
 def heuristic_check(
     difficulty: DifficultyScore,
     call: ClaudeCallResult,

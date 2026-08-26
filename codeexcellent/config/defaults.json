@@ -27,7 +27,15 @@
   },
   "quality": {
     "min_pass_score": 7.0,
-    "use_claude_review_at_or_above_difficulty": 6
+    "use_claude_review_at_or_above_difficulty": 6,
+    "min_pass_score_by_level": {
+      "trivial": 5.0,
+      "basic": 6.0,
+      "standard": 7.0,
+      "high": 8.0,
+      "critical": 9.0
+    },
+    "mandatory_review_levels": ["high", "critical"]
   },
   "claude": {
     "permission_mode": "acceptEdits",
@@ -37,10 +45,26 @@
   "context": {
     "max_files": 12,
     "max_bytes_per_file": 4000,
-    "max_total_bytes": 16000
+    "max_total_bytes": 16000,
+    "max_dependency_files": 3
   },
   "repository": {
     "max_files_scanned": 4000,
+    "hard_file_ceiling": 100000,
     "ignored_dirs": [".git", "node_modules", "venv", ".venv", "__pycache__", "dist", "build", ".next", "target", ".mypy_cache", ".pytest_cache", "vendor", ".codeexcellent"]
+  },
+  "adaptive": {
+    "min_samples_for_blend": 3,
+    "max_blend_weight": 0.7
+  },
+  "confidence": {
+    "low_threshold": 0.5,
+    "high_threshold": 0.8,
+    "low_confidence_budget_margin": 0.4,
+    "low_confidence_call_margin": 1
+  },
+  "strategy": {
+    "planning_cost": 1.5,
+    "critical_forces_review": true
   }
 }

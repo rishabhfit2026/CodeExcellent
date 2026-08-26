@@ -1,8 +1,15 @@
 """ExecutionController: the orchestrator. Wires TaskAnalyzer -> RepoAnalyzer
--> DifficultyScorer -> BudgetManager -> ContextManager -> CodingEngine ->
-TestRunner -> QualityChecker -> StopController into one run, with progressive
-budget escalation and feedback-carrying retries. This is the only module that
-knows the full pipeline; every other module is independently testable.
+-> AdaptiveDifficultyEstimator -> ResourceForecaster -> StrategySelector ->
+BudgetManager -> ContextManager -> CodingEngine -> TestRunner ->
+QualityChecker -> StopController -> OutcomeClassifier -> TaskMemory into one
+run, with confidence-aware progressive budget escalation and
+feedback-carrying retries. This is the only module that knows the full
+pipeline; every other module is independently testable.
+
+Claude's own session continuation (`--resume`) is what keeps retries cheap
+(sections 14-15): a retry prompt (core/retry.py) carries only the new
+feedback, not a re-statement of the original context, because the resumed
+session already has it.
 """
 from __future__ import annotations
 
@@ -11,14 +18,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from codeexcellent.analyzer import difficulty_scorer, task_analyzer
-from codeexcellent.budget import budget_manager
+from codeexcellent.analyzer import adaptive_estimator, difficulty_scorer, fingerprint, strategy_selector, task_analyzer
+from codeexcellent.budget import budget_manager, resource_forecaster
 from codeexcellent.claude.engine import CodingEngine
-from codeexcellent.core import context, git_safety, memory, prompts, repository, test_runner
+from codeexcellent.core import context, git_safety, memory, outcome, prompts, repository, test_runner
 from codeexcellent.core.models import (
     ExecutionAttempt,
     ExecutionMode,
     ExecutionReport,
+    PlanResult,
     QualityResult,
     SuiteRunResult,
 )
@@ -58,7 +66,34 @@ def _diff_text(root: str, changed_files: list[str], has_git: bool) -> str:
     return "\n\n".join(chunks)
 
 
-def run(request: str, root: str, config: dict, engine: CodingEngine, on_step: StepCallback | None = None) -> ExecutionReport:
+def _blocked_report(request: str, reason: str, difficulty=None, budget=None) -> ExecutionReport:
+    from codeexcellent.core.models import Budget, DifficultyScore, QualityLevel, RiskLevel
+
+    difficulty = difficulty or DifficultyScore(
+        value=0.0, band="unknown", risk_level=RiskLevel.LOW, dimensions={},
+        planning_required=False, testing_required=False, mode=ExecutionMode.DIRECT,
+        estimated_scope="small", quality_level=QualityLevel.TRIVIAL, reasons=[reason],
+    )
+    budget = budget or Budget(
+        band="unknown", effort="low", max_budget_usd=0.0, max_budget_usd_step=0.0,
+        max_claude_calls=0, max_retries=0, timeout_seconds=0,
+    )
+    return ExecutionReport(
+        task=request, difficulty=difficulty, budget=budget, attempts=[], status="BLOCKED",
+        total_cost_usd=0.0, total_duration_ms=0, files_changed=[],
+        final_quality=QualityResult(score=0.0, complete=False, needs_more_work=True, issues=[reason]),
+        outcome_class=outcome.OutcomeClass.INFRA_FAILURE,
+    )
+
+
+def plan(request: str, root: str, config: dict, on_step: StepCallback | None = None) -> PlanResult:
+    """Everything decidable before spending a single Claude call: task
+    analysis, repo inspection, adaptive difficulty, strategy, budget, and
+    resource forecast. Used by both `run()` and `codeexcellent analyze` so
+    the two can never show different numbers for the same task (a real V1
+    bug: `analyze` used to call the heuristic scorer directly and skip the
+    strategy selector entirely).
+    """
     on_step = on_step or _noop
 
     on_step("Analyzing task...")
@@ -66,19 +101,72 @@ def run(request: str, root: str, config: dict, engine: CodingEngine, on_step: St
 
     on_step("Inspecting repository...")
     repo = repository.analyze(root, config)
+
+    hard_ceiling = int(config.get("repository", {}).get("hard_file_ceiling", 100000))
+    if repo.file_count >= hard_ceiling:
+        on_step("BLOCKED: repository too large to safely operate on")
+        reason = f"Repository has {repo.file_count}+ files, over the safety ceiling of {hard_ceiling}"
+        empty_difficulty = difficulty_scorer.score(task, repo, config)
+        empty_budget = budget_manager.allocate(empty_difficulty, config)
+        return PlanResult(
+            task=task, repo=repo, difficulty=empty_difficulty, budget=empty_budget,
+            fingerprint=fingerprint.build(task, repo, empty_difficulty),
+            forecast=resource_forecaster.forecast("blocked", root, empty_budget, 0, config),
+            blocked_reason=reason,
+        )
+
     repo.relevant_files = repository.find_relevant_files(
         root, request, config, max_results=config.get("context", {}).get("max_files", 12)
     )
 
-    difficulty = difficulty_scorer.score(task, repo, config)
-    budget = budget_manager.allocate(difficulty, config)
+    heuristic_difficulty = difficulty_scorer.score(task, repo, config)
+    difficulty = adaptive_estimator.estimate(task, repo, heuristic_difficulty, root, config)
+
+    task_fingerprint = fingerprint.build(task, repo, difficulty)
+    mode, strategy_reasons = strategy_selector.select(task, difficulty, config)
+    difficulty.mode = mode
+    difficulty.planning_required = mode in (ExecutionMode.LIGHTWEIGHT, ExecutionMode.FULL)
+    difficulty.reasons = [*difficulty.reasons, *strategy_reasons]
+
+    budget = budget_manager.allocate_adaptive(difficulty, config)
 
     on_step(
-        f"Difficulty {difficulty.value}/10 ({difficulty.band}), mode={difficulty.mode.value}, "
+        f"Difficulty {difficulty.value}/10 ({difficulty.band}, confidence={difficulty.confidence}, "
+        f"basis={difficulty.basis}), risk={difficulty.risk_level.value}, mode={difficulty.mode.value}, "
         f"budget=${budget.max_budget_usd} effort={budget.effort}"
     )
+    for reason in difficulty.reasons:
+        on_step(f"  reason: {reason}")
 
     context_bundle = context.build(repo, repo.relevant_files, config)
+    forecast = resource_forecaster.forecast(task_fingerprint.key(), root, budget, context_bundle.total_bytes, config)
+    on_step(
+        f"Forecast ({forecast.basis}, n={forecast.sample_size}): ~{forecast.expected_calls} call(s), "
+        f"~{forecast.expected_retries} retr(y/ies)"
+    )
+
+    return PlanResult(
+        task=task, repo=repo, difficulty=difficulty, budget=budget,
+        fingerprint=task_fingerprint, forecast=forecast, context_bundle=context_bundle,
+    )
+
+
+def run(request: str, root: str, config: dict, engine: CodingEngine, on_step: StepCallback | None = None) -> ExecutionReport:
+    on_step = on_step or _noop
+
+    available, detail = engine.is_available()
+    if not available:
+        on_step(f"BLOCKED: {detail}")
+        return _blocked_report(request, f"Coding engine unavailable: {detail}")
+
+    planned = plan(request, root, config, on_step)
+    if planned.blocked_reason:
+        return _blocked_report(request, planned.blocked_reason, planned.difficulty, planned.budget)
+
+    task, repo, difficulty, budget = planned.task, planned.repo, planned.difficulty, planned.budget
+    task_fingerprint, forecast = planned.fingerprint, planned.forecast
+
+    context_bundle = planned.context_bundle
     context_text = context.render_prompt_context(context_bundle)
 
     mtime_baseline = None if repo.has_git else repository.snapshot_mtimes(root, config)
@@ -105,6 +193,8 @@ def run(request: str, root: str, config: dict, engine: CodingEngine, on_step: St
                 plan_text = plan_call.result_text
 
     base_prompt = prompts.implementation_prompt(request, context_text, difficulty, plan=plan_text)
+    min_pass = quality_checker.min_pass_score_for(difficulty, config)
+    needs_review = quality_checker.review_required(difficulty, config)
 
     attempts: list[ExecutionAttempt] = []
     session_id: str | None = None
@@ -113,71 +203,76 @@ def run(request: str, root: str, config: dict, engine: CodingEngine, on_step: St
     quality = QualityResult(score=0.0, complete=False, needs_more_work=True)
     status = "INCOMPLETE"
     current_budget = budget
+    escalation_reasons: list[str] = []
+    cancelled = False
 
-    while True:
-        attempt_number += 1
-        on_step(f"Calling Claude (attempt {attempt_number}, effort={current_budget.effort})...")
+    try:
+        while True:
+            attempt_number += 1
+            on_step(f"Calling Claude (attempt {attempt_number}, effort={current_budget.effort})...")
 
-        if attempt_number == 1:
-            prompt = base_prompt
-        else:
-            prompt = build_retry_prompt(request, attempts[-1].call, attempts[-1].tests, attempts[-1].quality)
+            if attempt_number == 1:
+                prompt = base_prompt
+            else:
+                prompt = build_retry_prompt(request, attempts[-1].call, attempts[-1].tests, attempts[-1].quality)
 
-        call = engine.execute(prompt, root, current_budget, session_id=session_id)
-        session_id = call.session_id or session_id
-        cost_so_far += call.cost_usd
+            call = engine.execute(prompt, root, current_budget, session_id=session_id)
+            session_id = call.session_id or session_id
+            cost_so_far += call.cost_usd
 
-        if repo.has_git:
-            changed = git_safety.changed_files_since(root, repo.git_dirty_files)
-        else:
-            after = repository.snapshot_mtimes(root, config)
-            changed = repository.diff_mtimes(mtime_baseline or {}, after)
+            if repo.has_git:
+                changed = git_safety.changed_files_since(root, repo.git_dirty_files)
+            else:
+                after = repository.snapshot_mtimes(root, config)
+                changed = repository.diff_mtimes(mtime_baseline or {}, after)
 
-        if difficulty.testing_required:
-            on_step("Running tests...")
-            tests = test_runner.run(repo, timeout_seconds=current_budget.timeout_seconds)
-        else:
-            tests = SuiteRunResult(ran=False, success=True, output_tail="Testing not required for this task.")
+            if difficulty.testing_required:
+                on_step("Running tests...")
+                tests = test_runner.run(repo, timeout_seconds=current_budget.timeout_seconds)
+            else:
+                tests = SuiteRunResult(ran=False, success=True, output_tail="Testing not required for this task.")
 
-        min_pass = config.get("quality", {}).get("min_pass_score", 7.0)
-        quality = quality_checker.heuristic_check(difficulty, call, tests, changed, min_pass)
+            quality = quality_checker.heuristic_check(difficulty, call, tests, changed, min_pass)
 
-        review_threshold = config.get("quality", {}).get("use_claude_review_at_or_above_difficulty", 6)
-        if (
-            call.success
-            and difficulty.value >= review_threshold
-            and attempt_number < current_budget.max_claude_calls
-        ):
-            on_step("Running quality review...")
-            diff_text = _diff_text(root, changed, repo.has_git)
-            review_call = engine.execute(
-                quality_checker.build_review_prompt(request, changed, diff_text, tests),
-                root, current_budget,
-                json_schema=quality_checker.REVIEW_JSON_SCHEMA,
-                allowed_tools=["Read", "Glob", "Grep"],
-            )
-            cost_so_far += review_call.cost_usd
-            reviewed = quality_checker.parse_review_response(review_call, min_pass)
-            if reviewed:
-                quality = reviewed
+            if call.success and needs_review and attempt_number < current_budget.max_claude_calls:
+                on_step("Running quality review...")
+                diff_text = _diff_text(root, changed, repo.has_git)
+                review_call = engine.execute(
+                    quality_checker.build_review_prompt(request, changed, diff_text, tests),
+                    root, current_budget,
+                    json_schema=quality_checker.REVIEW_JSON_SCHEMA,
+                    allowed_tools=["Read", "Glob", "Grep"],
+                )
+                cost_so_far += review_call.cost_usd
+                reviewed = quality_checker.parse_review_response(review_call, min_pass)
+                if reviewed:
+                    quality = reviewed
 
-        attempts.append(ExecutionAttempt(call=call, tests=tests, quality=quality, changed_files=changed))
+            attempts.append(ExecutionAttempt(call=call, tests=tests, quality=quality, changed_files=changed))
 
-        decision = decide(quality, attempt_number, current_budget, cost_so_far, call.success)
-        on_step(decision.reason)
+            decision = decide(quality, attempt_number, current_budget, cost_so_far, call.success)
+            on_step(decision.reason)
 
-        if decision.stop:
-            status = decision.status
-            break
+            if decision.stop:
+                status = decision.status
+                break
 
-        if attempt_number >= current_budget.max_claude_calls:
-            status = "INCOMPLETE"
-            break
+            if attempt_number >= current_budget.max_claude_calls:
+                status = "INCOMPLETE"
+                break
 
-        current_budget = budget_manager.escalate(current_budget, config)
+            escalation_reasons.append(decision.reason)
+            current_budget = budget_manager.escalate(current_budget, config)
+    except KeyboardInterrupt:
+        status = "CANCELLED"
+        cancelled = True
 
     all_changed: list[str] = sorted({f for a in attempts for f in a.changed_files})
     total_duration = sum(a.call.duration_ms for a in attempts)
+
+    outcome_class = outcome.classify(status, attempts, task)
+    observed = outcome.observed_difficulty(outcome_class, attempts, budget, quality)
+    difficulty_error = round(observed - difficulty.value, 2) if observed is not None else None
 
     report = ExecutionReport(
         task=request,
@@ -189,6 +284,12 @@ def run(request: str, root: str, config: dict, engine: CodingEngine, on_step: St
         total_duration_ms=total_duration,
         files_changed=all_changed,
         final_quality=quality,
+        fingerprint=task_fingerprint,
+        outcome_class=outcome_class,
+        observed_difficulty=observed,
+        difficulty_error=difficulty_error,
+        resource_forecast=forecast,
+        escalation_reasons=escalation_reasons,
     )
 
     memory.record(
@@ -206,7 +307,22 @@ def run(request: str, root: str, config: dict, engine: CodingEngine, on_step: St
             retries=max(0, len(attempts) - 1),
             files_changed=len(all_changed),
             quality_score=quality.score if quality else None,
+            fingerprint_key=task_fingerprint.key(),
+            fingerprint_category=task_fingerprint.category,
+            fingerprint_repo_type=task_fingerprint.repo_type,
+            fingerprint_scope=task_fingerprint.scope,
+            fingerprint_risk=task_fingerprint.risk,
+            confidence=difficulty.confidence,
+            quality_level=difficulty.quality_level.value,
+            outcome_class=outcome_class.value,
+            observed_difficulty=observed,
+            difficulty_error=difficulty_error,
+            forecast_calls=forecast.expected_calls,
+            forecast_basis=forecast.basis,
         ),
     )
+
+    if cancelled:
+        on_step("Cancelled by user.")
 
     return report

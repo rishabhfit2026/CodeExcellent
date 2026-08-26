@@ -5,6 +5,7 @@ ContextManager never has to consider "send everything".
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -190,14 +191,60 @@ def diff_mtimes(before: dict[str, float], after: dict[str, float]) -> list[str]:
     return sorted(changed)
 
 
+_IMPORT_PATTERNS = [
+    re.compile(r"^\s*from\s+([\w.]+)\s+import", re.MULTILINE),
+    re.compile(r"^\s*import\s+([\w.]+)", re.MULTILINE),
+    re.compile(r"""require\(['"]([^'"]+)['"]\)"""),
+    re.compile(r"""from\s+['"]([^'"]+)['"]"""),
+]
+
+_CONTENT_SCAN_MAX_FILES = 300
+_CONTENT_SCAN_MAX_FILE_BYTES = 100_000
+
+
+def _is_test_path(root_path: Path, f: Path) -> bool:
+    rel = f.relative_to(root_path)
+    return "test" in rel.parts or f.name.startswith("test_") or f.name.endswith(("_test.py", ".test.js", ".test.ts"))
+
+
+def _extract_imports(content: str) -> list[str]:
+    names: list[str] = []
+    for pattern in _IMPORT_PATTERNS:
+        names.extend(pattern.findall(content))
+    return names
+
+
+def _resolve_import(import_name: str, known_files: set[str]) -> str | None:
+    dotted = import_name.replace(".", "/") + ".py"
+    if dotted in known_files:
+        return dotted
+    base = import_name.lstrip("./")
+    for ext in (".py", ".js", ".ts", ".jsx", ".tsx"):
+        candidate = base + ext
+        if candidate in known_files:
+            return candidate
+        # also try just the last path segment (e.g. "../services/token" -> "token.py")
+        last_segment = base.rsplit("/", 1)[-1] + ext
+        for known in known_files:
+            if known.endswith("/" + last_segment) or known == last_segment:
+                return known
+    return None
+
+
 def find_relevant_files(root: str, task_request: str, config: dict, max_results: int = 12) -> list[str]:
-    """Keyword-score files by path/name relevance to the task text. Cheap and
-    local -- no repo content leaves the machine at this stage.
+    """Keyword-score files by path relevance first (cheap, no file reads). If
+    that doesn't fill max_results, fall back to a bounded content scan (a
+    file whose *code* mentions the task's keywords even if its path doesn't,
+    e.g. "fix JWT expiration" matching a function inside token_service.py).
+    Then pull in a small, capped set of each match's direct dependencies and
+    same-named tests -- context.py preserves this ordering, so primary
+    matches always outrank pulled-in dependencies within the context budget.
     """
     root_path = Path(root).resolve()
     repo_cfg = config.get("repository", {})
     ignored_dirs = set(repo_cfg.get("ignored_dirs", []))
     max_files = int(repo_cfg.get("max_files_scanned", 4000))
+    dep_cap = int(config.get("context", {}).get("max_dependency_files", 3))
 
     words = {w for w in task_request.lower().split() if len(w) > 3}
     if not words:
@@ -205,14 +252,77 @@ def find_relevant_files(root: str, task_request: str, config: dict, max_results:
 
     files = _walk_files(root_path, ignored_dirs, max_files)
     scored: list[tuple[float, Path]] = []
+    matched_rel_lower: set[str] = set()
+
     for f in files:
         rel = str(f.relative_to(root_path)).lower()
         score = sum(1.0 for w in words if w in rel)
         if score <= 0:
-            continue  # no keyword overlap at all -- do not include as "relevant"
+            continue
         if f.suffix in _LANGUAGE_BY_EXT:
             score += 0.1  # tiebreaker among files that already matched
         scored.append((score, f))
+        matched_rel_lower.add(rel)
+
+    if len(scored) < max_results:
+        scanned = 0
+        for f in files:
+            if scanned >= _CONTENT_SCAN_MAX_FILES or len(scored) >= max_results * 2:
+                break
+            if f.suffix not in _LANGUAGE_BY_EXT:
+                continue
+            rel_lower = str(f.relative_to(root_path)).lower()
+            if rel_lower in matched_rel_lower:
+                continue
+            try:
+                if f.stat().st_size > _CONTENT_SCAN_MAX_FILE_BYTES:
+                    continue
+                content = f.read_text(errors="ignore").lower()
+            except OSError:
+                continue
+            scanned += 1
+            content_score = sum(0.5 for w in words if w in content)  # weighted below a path match
+            if content_score > 0:
+                scored.append((content_score, f))
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [str(f.relative_to(root_path)) for _, f in scored[:max_results]]
+    top = scored[:max_results]
+    top_paths = [str(f.relative_to(root_path)) for _, f in top]
+    result = list(top_paths)
+    seen = set(top_paths)
+
+    if dep_cap > 0 and top:
+        known_files = {str(f.relative_to(root_path)) for f in files}
+        top_stems = {f.stem for _, f in top}
+        extras: list[str] = []
+
+        for _, f in top[:5]:
+            if len(extras) >= dep_cap:
+                break
+            try:
+                content = f.read_text(errors="ignore")
+            except OSError:
+                continue
+            for imp in _extract_imports(content):
+                resolved = _resolve_import(imp, known_files)
+                if resolved and resolved not in seen and resolved not in extras:
+                    extras.append(resolved)
+                    if len(extras) >= dep_cap:
+                        break
+
+        if len(extras) < dep_cap:
+            for f in files:
+                if len(extras) >= dep_cap:
+                    break
+                if not _is_test_path(root_path, f):
+                    continue
+                rel = str(f.relative_to(root_path))
+                if rel in seen or rel in extras:
+                    continue
+                stem = f.stem.replace("test_", "").replace("_test", "")
+                if stem in top_stems:
+                    extras.append(rel)
+
+        result.extend(extras)
+
+    return result

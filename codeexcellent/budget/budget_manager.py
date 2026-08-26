@@ -31,6 +31,36 @@ def allocate(difficulty: DifficultyScore, config: dict) -> Budget:
     )
 
 
+def allocate_adaptive(difficulty: DifficultyScore, config: dict) -> Budget:
+    """Confidence-aware allocation (section 8-9): a low-confidence estimate
+    gets a conservative margin added so an uncertain prediction doesn't
+    under-provision the run and force an escalation later. A high-confidence
+    estimate is left at the already-tight base allocation -- confidence
+    never shrinks a budget below the band default.
+    """
+    budget = allocate(difficulty, config)
+    confidence_cfg = config.get("confidence", {})
+    low_threshold = float(confidence_cfg.get("low_threshold", 0.5))
+    if difficulty.confidence >= low_threshold:
+        return budget
+
+    margin = float(confidence_cfg.get("low_confidence_budget_margin", 0.4))
+    call_margin = int(confidence_cfg.get("low_confidence_call_margin", 1))
+
+    max_claude_calls = budget.max_claude_calls + call_margin
+    max_retries = min(budget.max_retries + call_margin, max(0, max_claude_calls - 1))
+
+    return Budget(
+        band=budget.band,
+        effort=budget.effort,
+        max_budget_usd=round(budget.max_budget_usd * (1 + margin), 2),
+        max_budget_usd_step=budget.max_budget_usd_step,
+        max_claude_calls=max_claude_calls,
+        max_retries=max_retries,
+        timeout_seconds=budget.timeout_seconds,
+    )
+
+
 def escalate(budget: Budget, config: dict) -> Budget:
     """Progressive allocation (section 13): step up to the next budget band
     rather than handing out the maximum from the start. Used by the retry

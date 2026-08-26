@@ -37,6 +37,19 @@ class ClaudeRunner(CodingEngine):
         except (subprocess.TimeoutExpired, OSError) as exc:
             return False, f"'{self.binary}' found but failed to run: {exc}"
 
+    def auth_status(self) -> dict | None:
+        """Best-effort read of `claude auth status`. Returns None if the
+        binary is missing or the output isn't parseable JSON -- callers
+        (doctor) treat that as "unknown", not as a hard failure.
+        """
+        try:
+            result = subprocess.run(
+                [self.binary, "auth", "status"], capture_output=True, text=True, timeout=10,
+            )
+            return json.loads(result.stdout)
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+            return None
+
     def _build_command(
         self,
         prompt: str,

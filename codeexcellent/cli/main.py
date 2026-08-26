@@ -4,13 +4,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from codeexcellent.analyzer import difficulty_scorer, task_analyzer
-from codeexcellent.budget import budget_manager
 from codeexcellent.claude.claude_engine import ClaudeRunner
 from codeexcellent.config.settings import load_config
 from codeexcellent.core import memory, repository
+from codeexcellent.core.engine import plan as plan_task
 from codeexcellent.core.engine import run as run_engine
-from codeexcellent.core.models import ExecutionReport
+from codeexcellent.core.models import ExecutionReport, PlanResult
 
 _BANNER = "CodeExcellent"
 
@@ -20,23 +19,29 @@ def _print_header(title: str) -> None:
     print("-" * max(24, len(title)))
 
 
-def _analysis_report(request: str, root: str, config: dict) -> None:
-    task = task_analyzer.analyze(request)
-    repo = repository.analyze(root, config)
-    repo.relevant_files = repository.find_relevant_files(root, request, config)
-    difficulty = difficulty_scorer.score(task, repo, config)
-    budget = budget_manager.allocate(difficulty, config)
+def _analysis_report(request: str, root: str, config: dict) -> PlanResult:
+    planned = plan_task(request, root, config)
+    difficulty, budget, forecast = planned.difficulty, planned.budget, planned.forecast
 
     print(_BANNER)
     _print_header("Task Analysis")
-    print(f"Difficulty: {difficulty.value}/10 ({difficulty.band})")
+    if planned.blocked_reason:
+        print(f"BLOCKED: {planned.blocked_reason}")
+        return planned
+
+    print(f"Difficulty: {difficulty.value}/10 ({difficulty.band}) [confidence {difficulty.confidence}, {difficulty.basis}]")
     print(f"Risk: {difficulty.risk_level.value}")
+    print(f"Quality level: {difficulty.quality_level.value}")
     print(f"Estimated scope: {difficulty.estimated_scope}")
     print(f"Planning required: {'yes' if difficulty.planning_required else 'no'}")
     print(f"Testing required: {'yes' if difficulty.testing_required else 'no'}")
     print(f"Strategy: {difficulty.mode.value}")
-    if repo.relevant_files:
-        print(f"Relevant files: {', '.join(repo.relevant_files[:8])}")
+    if difficulty.reasons:
+        print("Reasons:")
+        for reason in difficulty.reasons:
+            print(f"  - {reason}")
+    if planned.repo.relevant_files:
+        print(f"Relevant files: {', '.join(planned.repo.relevant_files[:8])}")
 
     _print_header("Budget")
     print(f"Effort: {budget.effort}")
@@ -44,6 +49,13 @@ def _analysis_report(request: str, root: str, config: dict) -> None:
     print(f"Max Claude calls: {budget.max_claude_calls}")
     print(f"Max retries: {budget.max_retries}")
     print(f"Timeout: {budget.timeout_seconds}s")
+
+    _print_header("Resource forecast")
+    print(f"Basis: {forecast.basis} (n={forecast.sample_size} similar past task(s))")
+    print(f"Expected Claude calls: ~{forecast.expected_calls}")
+    print(f"Expected retries: ~{forecast.expected_retries}")
+
+    return planned
 
 
 def _print_report(report: ExecutionReport) -> None:
@@ -60,6 +72,9 @@ def _print_report(report: ExecutionReport) -> None:
     last_tests = report.attempts[-1].tests if report.attempts else None
     if last_tests and last_tests.ran:
         print(f"Tests: {last_tests.passed} passed, {last_tests.failed} failed ({last_tests.command})")
+    if report.observed_difficulty is not None:
+        sign = "+" if (report.difficulty_error or 0) >= 0 else ""
+        print(f"Observed difficulty: {report.observed_difficulty}/10 (predicted {report.difficulty.value}, error {sign}{report.difficulty_error})")
     print(f"Total cost: ${report.total_cost_usd}")
     print(f"Total duration: {report.total_duration_ms / 1000:.1f}s")
     print(f"\nCodeExcellent: {report.status}")
@@ -85,7 +100,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             print("Aborted.")
             return 1
 
-    _analysis_report(args.prompt, root, config)
+    planned = _analysis_report(args.prompt, root, config)
+    if planned.blocked_reason:
+        return 1
     print("\nStarting Claude...")
 
     report = run_engine(args.prompt, root, config, engine, on_step=lambda msg: print(f"  {msg}"))
@@ -101,18 +118,132 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    config = load_config()
+    import json
+    import shutil as _shutil
+
+    ok = True
+
+    try:
+        config = load_config()
+        print("Configuration: OK -- loaded and merged successfully")
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Configuration: INVALID -- {exc}")
+        print("  Fix: check the JSON syntax in your ~/.codeexcellent/config.json (or $CODEEXCELLENT_CONFIG).")
+        return 1
+
     engine = ClaudeRunner(config)
     available, detail = engine.is_available()
     print(f"Claude CLI: {'OK' if available else 'MISSING'} -- {detail}")
+    if not available:
+        print("  Fix: install Claude Code and ensure 'claude' is on PATH (https://claude.com/claude-code).")
+        ok = False
+    else:
+        auth = engine.auth_status()
+        if auth is None:
+            print("Claude auth: UNKNOWN -- could not read `claude auth status`")
+        elif auth.get("loggedIn"):
+            print(f"Claude auth: OK -- logged in ({auth.get('subscriptionType', 'unknown plan')})")
+        else:
+            print("Claude auth: NOT LOGGED IN")
+            print("  Fix: run `claude auth login`.")
+            ok = False
+
     print(f"Python: {sys.version.split()[0]}")
+
+    git_path = _shutil.which("git")
+    print(f"Git: {'OK -- ' + git_path if git_path else 'MISSING'}")
+    if not git_path:
+        print("  Note: CodeExcellent still works without git, but loses change-isolation and dirty-state warnings.")
 
     root = str(Path(args.root).resolve())
     repo = repository.analyze(root, config)
     print(f"Target directory: {root}")
     print(f"Git repository: {'yes (' + repo.git_branch + ')' if repo.has_git and repo.git_branch else ('yes' if repo.has_git else 'no')}")
     print(f"Detected project types: {', '.join(repo.project_types) or 'none'}")
-    return 0 if available else 1
+    print(f"Detected test locations: {', '.join(repo.test_dirs) or 'none'}")
+
+    try:
+        db_path = memory.db_path(root)
+        memory.recent(root, limit=1)
+        print(f"History database: OK -- {db_path}")
+    except OSError as exc:
+        print(f"History database: INACCESSIBLE -- {exc}")
+        ok = False
+
+    return 0 if ok else 1
+
+
+def _print_benchmark_report(report) -> None:
+    _print_header(f"Benchmark results ({report.mode} mode)")
+    for r in report.results:
+        line = (
+            f"[{r.category:<10}] {r.task_id:<32} difficulty={r.predicted_difficulty:<5} "
+            f"mode={r.mode:<24} status={r.status:<10} calls={r.claude_calls} cost=${r.cost_usd}"
+        )
+        if r.raw_cost_usd is not None:
+            line += f"  | raw: cost=${r.raw_cost_usd} success={r.raw_success}"
+        print(line)
+
+    totals = report.totals()
+    _print_header("Summary")
+    print(f"Tasks: {totals['tasks']}")
+    print(f"Success rate: {totals['success_rate'] * 100:.0f}%")
+    print(f"Avg Claude calls: {totals['avg_claude_calls']}")
+    print(f"Avg cost: ${totals['avg_cost_usd']}")
+    print(f"Total cost: ${totals['total_cost_usd']}")
+    print(f"Avg quality: {totals['avg_quality']}/10")
+
+    compare = report.compare_totals()
+    if compare:
+        _print_header("CodeExcellent vs raw Claude (A/B)")
+        print(f"CodeExcellent total cost: ${compare['codeexcellent_total_cost_usd']}")
+        print(f"Raw Claude total cost:    ${compare['raw_total_cost_usd']}")
+        print(f"CodeExcellent avg calls per task: {compare['codeexcellent_avg_calls']}")
+
+    if report.mode == "mock":
+        print("\nNote: mock mode validates CodeExcellent's own decisions (difficulty/strategy/budget/call count) "
+              "at zero cost. It does not judge real code quality -- use --live for that.")
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    from codeexcellent.benchmark import runner
+    from codeexcellent.benchmark.mock_engine import MockBenchmarkEngine
+    from codeexcellent.benchmark.tasks import ALL_TASKS
+
+    config = load_config()
+    tasks = ALL_TASKS
+    if args.category:
+        tasks = [t for t in ALL_TASKS if t.category == args.category]
+        if not tasks:
+            categories = sorted({t.category for t in ALL_TASKS})
+            print(f"No benchmark tasks in category '{args.category}'. Choices: {', '.join(categories)}", file=sys.stderr)
+            return 1
+
+    if args.compare and not args.live:
+        print("--compare requires --live (a mock A/B comparison can't demonstrate real efficiency).", file=sys.stderr)
+        return 1
+
+    if args.live:
+        call_note = " x2 (CodeExcellent + a raw-Claude comparison)" if args.compare else ""
+        print(f"This will make real Claude CLI calls for {len(tasks)} task(s){call_note}, incurring real cost.")
+        if not args.yes:
+            answer = input("Continue? [y/N] ").strip().lower()
+            if answer != "y":
+                print("Aborted.")
+                return 1
+        engine_factory = lambda: ClaudeRunner(config)
+        mode = "live"
+    else:
+        engine_factory = MockBenchmarkEngine
+        mode = "mock"
+        print("Running in mock mode (no cost, no real Claude calls). Pass --live to benchmark against the real CLI.\n")
+
+    report = runner.run_suite(
+        config, engine_factory, mode, tasks=tasks, compare=args.compare,
+        on_step=lambda msg: print(f"  {msg}"),
+    )
+    _print_benchmark_report(report)
+    return 0
 
 
 def cmd_history(args: argparse.Namespace) -> int:
@@ -200,6 +331,13 @@ def build_parser() -> argparse.ArgumentParser:
     config_parser.add_argument("--show", action="store_true", help="Print the fully merged configuration")
     config_parser.set_defaults(func=cmd_config)
 
+    benchmark_parser = subparsers.add_parser("benchmark", help="Run the representative task benchmark suite")
+    benchmark_parser.add_argument("--live", action="store_true", help="Use the real Claude CLI (incurs real cost); default is a zero-cost mock engine")
+    benchmark_parser.add_argument("--compare", action="store_true", help="Also run each task via raw Claude (no orchestration) for an A/B comparison; requires --live")
+    benchmark_parser.add_argument("--category", choices=["trivial", "easy", "medium", "hard", "very_hard"], help="Only run tasks in this category")
+    benchmark_parser.add_argument("-y", "--yes", action="store_true", help="Skip the cost confirmation prompt for --live")
+    benchmark_parser.set_defaults(func=cmd_benchmark)
+
     return parser
 
 
@@ -214,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
     root_args, argv = root_pre_parser.parse_known_args(argv)
 
     # Bare invocation with no subcommand and no prompt-looking arg -> REPL.
-    known_commands = {"run", "analyze", "doctor", "history", "config", "-h", "--help"}
+    known_commands = {"run", "analyze", "doctor", "history", "config", "benchmark", "-h", "--help"}
     if not argv:
         return _interactive()
 

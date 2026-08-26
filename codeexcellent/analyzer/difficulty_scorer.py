@@ -2,31 +2,30 @@
 configurable weights (never a blind average -- risk and scope are allowed to
 push the score up even when other dimensions are low, since a small-looking
 change to a risky area is not actually a small task).
+
+This produces the heuristic estimate and a default mode/confidence as a
+self-contained fallback. `AdaptiveDifficultyEstimator` (analyzer/adaptive_estimator.py)
+wraps this with historical calibration; `StrategySelector`
+(analyzer/strategy_selector.py) is the authoritative source for execution
+mode once confidence and risk are known -- the `mode` field here is a
+reasonable default for callers that skip that stage.
 """
 from __future__ import annotations
 
+from codeexcellent.analyzer import risk_classifier
 from codeexcellent.core.models import (
     DifficultyScore,
     ExecutionMode,
     RepoContext,
-    RiskLevel,
     TaskAnalysis,
 )
 
 
-def _band_for(value: float, bands: dict[str, list[float]]) -> str:
+def band_for(value: float, bands: dict[str, list[float]]) -> str:
     for name, (lo, hi) in bands.items():
         if lo <= value < hi or (value == 10 and hi == 10):
             return name
     return "very_hard"
-
-
-def _risk_level(value: float) -> RiskLevel:
-    if value >= 6.5:
-        return RiskLevel.HIGH
-    if value >= 3.0:
-        return RiskLevel.MEDIUM
-    return RiskLevel.LOW
 
 
 def _mode_for(difficulty: float, thresholds: dict) -> ExecutionMode:
@@ -35,6 +34,42 @@ def _mode_for(difficulty: float, thresholds: dict) -> ExecutionMode:
     if difficulty < thresholds.get("lightweight_below", 6):
         return ExecutionMode.LIGHTWEIGHT
     return ExecutionMode.FULL
+
+
+def _confidence(task: TaskAnalysis, repo: RepoContext) -> float:
+    confidence = 0.85
+    if task.ambiguity >= 5.0:
+        confidence -= 0.25
+    if not task.keywords_matched:
+        confidence -= 0.10
+    if repo.file_count == 0:
+        confidence -= 0.10
+    return round(max(0.3, min(0.95, confidence)), 2)
+
+
+def _reasons(task: TaskAnalysis, repo: RepoContext, estimated_scope: str, risk_level) -> list[str]:
+    from codeexcellent.core.models import RiskLevel
+
+    reasons = []
+    if risk_level == RiskLevel.CRITICAL:
+        reasons.append("risk is CRITICAL (money movement or destructive-in-production signals detected)")
+    elif risk_level == RiskLevel.HIGH:
+        reasons.append("high-risk keywords detected in the request")
+    elif risk_level == RiskLevel.MEDIUM:
+        reasons.append("moderate risk signals in the request")
+    if repo.repo_complexity >= 5.0:
+        reasons.append(f"repository complexity is elevated ({repo.repo_complexity}/10)")
+    if task.architecture_signal >= 5.0:
+        reasons.append("request touches an architecture-sensitive area")
+    if estimated_scope == "large":
+        reasons.append("estimated change scope is large")
+    if task.ambiguity >= 5.0:
+        reasons.append("request wording is ambiguous, which adds execution risk")
+    if task.operation_count > 2:
+        reasons.append(f"request bundles {task.operation_count} distinct operations")
+    if not reasons:
+        reasons.append("no elevated risk or complexity signals found")
+    return reasons
 
 
 def score(task: TaskAnalysis, repo: RepoContext, config: dict) -> DifficultyScore:
@@ -65,8 +100,8 @@ def score(task: TaskAnalysis, repo: RepoContext, config: dict) -> DifficultyScor
 
     blended = round(min(10.0, max(0.0, blended)), 2)
 
-    band = _band_for(blended, config.get("difficulty_bands", {}))
-    risk_level = _risk_level(task.risk)
+    band = band_for(blended, config.get("difficulty_bands", {}))
+    risk_level = risk_classifier.classify_risk(task)
     mode = _mode_for(blended, config.get("planning_thresholds", {}))
 
     planning_required = mode != ExecutionMode.DIRECT
@@ -79,6 +114,8 @@ def score(task: TaskAnalysis, repo: RepoContext, config: dict) -> DifficultyScor
     else:
         estimated_scope = "small"
 
+    quality_level = risk_classifier.classify_quality_level(risk_level, estimated_scope, testing_required)
+
     return DifficultyScore(
         value=blended,
         band=band,
@@ -88,4 +125,9 @@ def score(task: TaskAnalysis, repo: RepoContext, config: dict) -> DifficultyScor
         testing_required=testing_required,
         mode=mode,
         estimated_scope=estimated_scope,
+        quality_level=quality_level,
+        confidence=_confidence(task, repo),
+        reasons=_reasons(task, repo, estimated_scope, risk_level),
+        basis="heuristic",
+        historical_sample_size=0,
     )

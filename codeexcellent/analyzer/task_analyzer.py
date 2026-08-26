@@ -91,6 +91,15 @@ def analyze(request: str) -> TaskAnalysis:
 
     keywords_matched = large_kw + arch_kw + risk_kw + test_kw + amb_kw + compat_kw
 
+    if large_hits > 0:
+        category = "large_refactor"
+    elif trivial_hits > 0:
+        category = "rename_or_typo"
+    elif small_hits > 0:
+        category = "small_change"
+    else:
+        category = "general"
+
     return TaskAnalysis(
         request=request,
         task_complexity=round(complexity, 2),
@@ -101,4 +110,5 @@ def analyze(request: str) -> TaskAnalysis:
         ambiguity=round(ambiguity, 2),
         operation_count=op_count,
         keywords_matched=sorted(set(keywords_matched)),
+        category=category,
     )
