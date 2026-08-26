@@ -1,5 +1,76 @@
 # Changelog
 
+## 0.2.2
+
+**Benchmark dataset made trustworthy for real comparative benchmarking**
+(benchmark data/framework only — no orchestration decision logic touched):
+
+- Audited all 15 (now 16) benchmark tasks against 10 criteria each (starting
+  state, requested change, correctness definition, automatability,
+  what must/must-not change, difficulty band justification, determinism,
+  false-positive/negative risk).
+- Upgraded 3 weak text-substring "validators" to real behavioral checks
+  (import the fixture module, call its functions, assert on actual return
+  values) and added validators to 9 more previously-unvalidated tasks —
+  14 of 16 tasks now have a reliable, behaviorally-verified `validate()`,
+  up from 5 of 15.
+- Found and fixed 2 broken fixtures: `easy_validation`'s bug didn't
+  actually exist as written (`"@" in ""` was already `False`, so "reject
+  empty strings" was true by accident); `hard_add_auth`'s fixture had no
+  header contract at all, making behavioral testing impossible without a
+  concrete `headers: dict` parameter and `VALID_API_KEY` constant.
+- **Found a real validator bug class via phase-4 baseline testing**: for
+  "preserve behavior while restructuring" tasks, checking only behavior
+  preservation trivially passes a complete no-op (unchanged code obviously
+  preserves its own behavior). Fixed for `hard_refactor_service` and
+  `very_hard_architecture_migration` by pairing the behavioral check with a
+  minimal structural signal that something changed. `very_hard_auth_migration`
+  had no such signal available without an arbitrary keyword check, so its
+  validator was removed entirely rather than kept as a validator that
+  couldn't actually discriminate correct from no-op.
+- **Found a second bug via the same process**: a hand-written "correct"
+  fix for `very_hard_cross_module_redesign` failed its own validator,
+  revealing the fixture's `inventory.adjust()` didn't return the new stock
+  level — so even a genuinely clean interface-based caller was forced to
+  read `inventory.STOCK` directly just to report a result. Fixed the
+  fixture, not the validator.
+- **Found and fixed a stderr-leak bug**: `easy_cli_flag`'s validator called
+  the fixture's `argparse`-based `main()` with an unrecognized flag,
+  redirecting only stdout — argparse's usage/error text went to the real
+  process's stderr instead (under the misleading program name
+  "codeexcellent", since unpatched argparse derives it from *our* `sys.argv[0]`).
+- Reclassified `medium_add_endpoint` trivial→easy: mechanically identical
+  complexity to `easy_helper` ("add one new function returning a fixed
+  value") that had landed in a different band — a correction of a specific
+  inconsistency, not a rebalancing pass.
+- Added `easy_cli_flag`: the only requested task-type category (bug fix,
+  feature, refactor, test creation, API change, CLI change, config change,
+  data transform, security change, multi-file change) with zero
+  representation in the previous 15 tasks.
+- Documented (rather than weakly validated) 2 tasks whose correctness
+  criteria have no fixed, checkable contract: `hard_change_data_flow`
+  ("batch processing" doesn't specify whether `handle`'s signature should
+  change) and `very_hard_auth_migration` (see above).
+- `BenchmarkResult`/`BenchmarkReport` extended with the full correctness/
+  efficiency/quality/prediction metric set (retries, confidence, risk,
+  planning_used, test pass/fail counts, files_changed) and a
+  `by_difficulty()` breakdown — aggregates never average a metric over
+  tasks it doesn't apply to (e.g. `test_pass_rate` only counts tasks that
+  actually ran tests).
+- Broadened `run_suite`'s validator exception handling from `OSError` to
+  `Exception`: import-based validators can legitimately raise
+  `ImportError`/`SyntaxError`/`AttributeError` when an agent's edit breaks
+  the fixture, which is a real "the task failed" signal, not a validator
+  bug — the narrower catch would have crashed the whole benchmark run
+  instead of recording it correctly.
+- Added isolation tests proving one task's directory can never leak into
+  another's (even running the identical task twice in a row), and that a
+  `--compare` run's raw-Claude execution is fully separate from
+  CodeExcellent's own.
+- 51 new tests (`tests/test_benchmark_validators.py`,
+  isolation/metric additions to `tests/test_benchmark.py`): baseline-fails/
+  correct-passes/incorrect-fails for every validated task.
+
 ## 0.2.1
 
 **Interactive mode is now the primary UX** (no changes to difficulty/

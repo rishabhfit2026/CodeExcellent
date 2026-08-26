@@ -354,17 +354,29 @@ codeexcellent benchmark --live             # real Claude CLI calls -- asks for c
 codeexcellent benchmark --live --compare   # + a raw "just call Claude directly" comparison per task
 ```
 
-`codeexcellent/benchmark/tasks.py` defines 15 representative tasks, three
-each at trivial/easy/medium/hard/very_hard. Each `BenchmarkTask` carries a
-task description, a fixture-repo generator, and an `expected_behavior`
-string describing correct completion; a representative subset (one per
-difficulty band) also has a `validate(root) -> (passed, message)` function
-that programmatically checks the actual file contents after a run, rather
-than relying only on the heuristic quality score — e.g. the trivial-rename
-task's validator reads `greet.py` back and checks the parameter was
-genuinely renamed. Adding a `validate` to any of the remaining tasks is a
-self-contained addition to `tasks.py`; nothing else needs to change. The
-default mock engine (`benchmark/mock_engine.py`) makes no real Claude
+`codeexcellent/benchmark/tasks.py` defines 16 tasks spanning trivial through
+very_hard. Each `BenchmarkTask` carries a task description, a fixture-repo
+generator, and an `expected_behavior` string describing correct completion;
+14 of the 16 also have a `validate(root) -> (passed, message)` function that
+imports the fixture module in-process and calls its real functions,
+asserting on actual return values — behavioral, not text-matching (e.g. the
+trivial-rename validator calls `greet("World")` and checks it returns
+`"Hello, World"`, and that the parameter isn't still named `nam`). Every
+validator was verified against three synthetic states before being
+trusted — the untouched baseline fails, a hand-written correct fix passes,
+and a distinct incorrect fix fails — see `tests/test_benchmark_validators.py`.
+That process caught a real bug class: for "preserve behavior while
+restructuring" tasks, checking behavior preservation alone trivially passes
+a complete no-op (unchanged code obviously preserves its own behavior), so
+those validators pair it with a minimal structural signal that something
+actually changed. The remaining 2 tasks deliberately have no validator, with
+the reason documented at each — one has no fixed implementation contract to
+assert on (any validator would false-negative a differently-shaped but
+correct fix), the other's only seemingly-objective check turned out to be
+satisfiable by a no-op too. Adding a `validate` to a task without one is a
+self-contained addition to `tasks.py`.
+
+The default mock engine (`benchmark/mock_engine.py`) makes no real Claude
 calls — it validates CodeExcellent's own decision-making (difficulty,
 strategy, call count) across the whole suite at zero cost, but it doesn't
 produce correct code, so its quality scores and `validated` results aren't
@@ -373,7 +385,21 @@ and is the only mode whose numbers say anything about actual code quality,
 actual validation-check pass rate, or actual cost; `--compare` additionally
 calls Claude directly with no orchestration on the same fixture, for an
 honest A/B of CodeExcellent vs. "just use Claude" — never run
-automatically, always behind an explicit confirmation.
+automatically, always behind an explicit confirmation. Each task runs in
+its own fresh temporary directory, destroyed after use, and a `--compare`
+run's raw-Claude execution gets an entirely separate directory from
+CodeExcellent's own — the two systems (and consecutive tasks) cannot leak
+state into each other.
+
+The report distinguishes correctness (`status`, `validated`), efficiency
+(`cost_usd`, `duration_ms`, `claude_calls`, `retries` — all real numbers
+from the CLI's own accounting, never estimated tokens), quality (test pass/
+fail counts, `quality_score`, `files_changed`), and prediction (difficulty,
+confidence, risk, strategy, `planning_used`) as separate fields — a
+validator only ever answers "did the expected behavior become true," never
+"did CodeExcellent think this was hard." `report.totals()` and
+`report.by_difficulty()` never average a metric over tasks it doesn't apply
+to (e.g. `test_pass_rate` only counts tasks that actually ran tests).
 
 A note on labels vs. reality: the benchmark task *names* ("hard_...",
 "very_hard_...") are my own subjective difficulty labels when writing the
@@ -416,7 +442,7 @@ shim on Windows is found the same way a `.exe`/`.sh` would be on Linux/macOS.
 .venv/bin/pytest -q
 ```
 
-All 115 tests run against a mocked `CodingEngine`/`subprocess.run` and a
+All 166 tests run against a mocked `CodingEngine`/`subprocess.run` and a
 temp-directory SQLite history — no Claude subscription or API access is
 required, and nothing shells out to the real `claude` binary during the
 test suite. This includes packaging tests (`tests/test_packaging.py`) that
@@ -425,9 +451,11 @@ executable-resolution tests (`tests/test_platform_utils.py`,
 `tests/test_test_runner.py`); interactive-mode tests
 (`tests/test_interactive.py`) that script stdin against a stub engine;
 top-level error-handling tests (`tests/test_error_handling.py`) proving a
-raw traceback never reaches the user outside `--debug`; and benchmark
-validation-wiring tests (`tests/test_benchmark.py`). Beyond the unit suite,
-the pipeline has also been verified against the real Claude CLI end-to-end
+raw traceback never reaches the user outside `--debug`; benchmark framework
+tests (`tests/test_benchmark.py`) covering isolation and metric/report
+correctness; and per-task baseline/correct/incorrect validator tests
+(`tests/test_benchmark_validators.py`). Beyond the unit suite, the pipeline
+has also been verified against the real Claude CLI end-to-end
 (trivial and CRITICAL-risk tasks via `analyze`, a real `run` against a
 scratch repo, a full interactive-session smoke test), and the packaging
 itself has been verified by building the sdist/wheel (`python -m build`,

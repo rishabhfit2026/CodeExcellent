@@ -187,8 +187,11 @@ def _print_benchmark_report(report) -> None:
     for r in report.results:
         line = (
             f"[{r.category:<10}] {r.task_id:<32} difficulty={r.predicted_difficulty:<5} "
-            f"mode={r.mode:<24} status={r.status:<10} calls={r.claude_calls} cost=${r.cost_usd}"
+            f"risk={r.risk:<8} mode={r.mode:<24} status={r.status:<10} "
+            f"calls={r.claude_calls} retries={r.retries} cost=${r.cost_usd}"
         )
+        if r.tests_ran:
+            line += f"  | tests={r.tests_passed}p/{r.tests_failed}f"
         if r.validated is not None:
             line += f"  | validated={'yes' if r.validated else 'no (' + (r.validation_message or '') + ')'}"
         if r.raw_cost_usd is not None:
@@ -197,14 +200,29 @@ def _print_benchmark_report(report) -> None:
 
     totals = report.totals()
     _print_header("Summary")
-    print(f"Tasks: {totals['tasks']}")
+    print(f"Tasks: {totals['total_tasks']} ({totals['successful_tasks']} successful)")
     print(f"Success rate: {totals['success_rate'] * 100:.0f}%")
-    print(f"Avg Claude calls: {totals['avg_claude_calls']}")
-    print(f"Avg cost: ${totals['avg_cost_usd']}")
-    print(f"Total cost: ${totals['total_cost_usd']}")
-    print(f"Avg quality: {totals['avg_quality']}/10")
+    print(f"Avg agent calls: {totals['average_agent_calls']}  |  Avg retries: {totals['average_retries']}")
+    print(f"Avg resource usage: ${totals['average_resource_usage_usd']}  |  Total: ${totals['total_resource_usage_usd']}")
+    print(f"Avg duration: {totals['average_duration_ms']:.0f}ms")
+    print(f"Avg quality: {totals['average_quality']}/10")
     if "validated_tasks" in totals:
         print(f"Validated pass rate: {totals['validated_pass_rate'] * 100:.0f}% ({totals['validated_tasks']} task(s) with an automated check)")
+    if "tasks_with_tests_run" in totals:
+        print(f"Test pass rate: {totals['test_pass_rate'] * 100:.0f}% ({totals['tasks_with_tests_run']} task(s) that ran tests)")
+
+    by_difficulty = report.by_difficulty()
+    if by_difficulty:
+        _print_header("By difficulty band")
+        for band in ("trivial", "easy", "medium", "hard", "very_hard"):
+            if band not in by_difficulty:
+                continue
+            stats = by_difficulty[band]
+            print(
+                f"{band:<10} tasks={stats['tasks']:<3} success={stats['success_rate'] * 100:.0f}%  "
+                f"avg_calls={stats['average_agent_calls']}  avg_cost=${stats['average_resource_usage_usd']}  "
+                f"avg_duration={stats['average_duration_ms']:.0f}ms"
+            )
 
     compare = report.compare_totals()
     if compare:

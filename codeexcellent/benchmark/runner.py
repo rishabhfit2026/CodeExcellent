@@ -21,6 +21,7 @@ from typing import Callable
 from codeexcellent.benchmark.tasks import ALL_TASKS, BenchmarkTask
 from codeexcellent.claude.engine import CodingEngine
 from codeexcellent.core.engine import run as run_engine
+from codeexcellent.core.models import ExecutionMode
 from codeexcellent.core.platform_utils import resolve_executable
 
 EngineFactory = Callable[[], CodingEngine]
@@ -29,21 +30,36 @@ StepCallback = Callable[[str], None]
 
 @dataclass
 class BenchmarkResult:
+    """One task's result. Correctness, efficiency, quality, and prediction
+    metrics are kept as separate fields (not folded into one score) per the
+    benchmarking phase's instruction not to conflate "was it correct" with
+    "did CodeExcellent think it was hard" -- those answer different
+    questions and must stay independently inspectable.
+    """
+
     task_id: str
     category: str
-    predicted_difficulty: float
-    predicted_band: str
-    mode: str
-    status: str
-    quality_score: float | None
-    claude_calls: int
-    cost_usd: float
-    duration_ms: int
+    status: str  # CORRECTNESS: COMPLETE/INCOMPLETE/FAILED/BLOCKED/CANCELLED
+    validated: bool | None  # CORRECTNESS: None = task has no automated validate() check
+    validation_message: str | None
+    cost_usd: float  # EFFICIENCY -- real cost from the CLI's own accounting, never estimated
+    duration_ms: int  # EFFICIENCY
+    claude_calls: int  # EFFICIENCY
+    retries: int  # EFFICIENCY
+    quality_score: float | None  # QUALITY
+    tests_ran: bool  # QUALITY
+    tests_passed: int  # QUALITY
+    tests_failed: int  # QUALITY
+    files_changed: int  # QUALITY
+    predicted_difficulty: float  # PREDICTION
+    predicted_band: str  # PREDICTION
+    confidence: float  # PREDICTION
+    risk: str  # PREDICTION
+    mode: str  # PREDICTION -- selected strategy
+    planning_used: bool  # PREDICTION
     raw_cost_usd: float | None = None
     raw_duration_ms: int | None = None
     raw_success: bool | None = None
-    validated: bool | None = None  # None = task has no automated validate() check
-    validation_message: str | None = None
 
 
 @dataclass
@@ -52,20 +68,58 @@ class BenchmarkReport:
     results: list[BenchmarkResult] = field(default_factory=list)
 
     def totals(self) -> dict:
+        """Aggregate metrics. Never averages over a denominator that
+        includes tasks the metric doesn't apply to (e.g. tasks with no
+        validate() are excluded from validated_pass_rate, tasks that never
+        ran tests are excluded from test_pass_rate) -- an average over a
+        mix of "0" and "not applicable" would misrepresent both.
+        """
         n = len(self.results) or 1
         validated_results = [r for r in self.results if r.validated is not None]
+        tested_results = [r for r in self.results if r.tests_ran]
+
         totals = {
-            "tasks": len(self.results),
+            "total_tasks": len(self.results),
+            "successful_tasks": sum(1 for r in self.results if r.status == "COMPLETE"),
             "success_rate": round(sum(1 for r in self.results if r.status == "COMPLETE") / n, 2),
-            "avg_claude_calls": round(sum(r.claude_calls for r in self.results) / n, 2),
-            "avg_cost_usd": round(sum(r.cost_usd for r in self.results) / n, 4),
-            "total_cost_usd": round(sum(r.cost_usd for r in self.results), 4),
-            "avg_quality": round(sum(r.quality_score or 0 for r in self.results) / n, 2),
+            "average_agent_calls": round(sum(r.claude_calls for r in self.results) / n, 2),
+            "average_retries": round(sum(r.retries for r in self.results) / n, 2),
+            "average_resource_usage_usd": round(sum(r.cost_usd for r in self.results) / n, 4),
+            "total_resource_usage_usd": round(sum(r.cost_usd for r in self.results), 4),
+            "average_duration_ms": round(sum(r.duration_ms for r in self.results) / n, 1),
+            "average_quality": round(sum(r.quality_score or 0 for r in self.results) / n, 2),
         }
         if validated_results:
             totals["validated_tasks"] = len(validated_results)
             totals["validated_pass_rate"] = round(sum(1 for r in validated_results if r.validated) / len(validated_results), 2)
+        if tested_results:
+            totals["tasks_with_tests_run"] = len(tested_results)
+            totals["test_pass_rate"] = round(
+                sum(1 for r in tested_results if r.tests_failed == 0) / len(tested_results), 2
+            )
         return totals
+
+    def by_difficulty(self) -> dict[str, dict]:
+        """Per-band breakdown (success_by_difficulty / efficiency_by_difficulty),
+        keyed by the task's benchmark category (trivial/easy/medium/hard/
+        very_hard). A band with zero results simply doesn't appear -- it is
+        not reported as a misleading 0%.
+        """
+        bands: dict[str, list[BenchmarkResult]] = {}
+        for r in self.results:
+            bands.setdefault(r.category, []).append(r)
+
+        breakdown = {}
+        for band, band_results in bands.items():
+            n = len(band_results)
+            breakdown[band] = {
+                "tasks": n,
+                "success_rate": round(sum(1 for r in band_results if r.status == "COMPLETE") / n, 2),
+                "average_agent_calls": round(sum(r.claude_calls for r in band_results) / n, 2),
+                "average_resource_usage_usd": round(sum(r.cost_usd for r in band_results) / n, 4),
+                "average_duration_ms": round(sum(r.duration_ms for r in band_results) / n, 1),
+            }
+        return breakdown
 
     def compare_totals(self) -> dict | None:
         with_raw = [r for r in self.results if r.raw_cost_usd is not None]
@@ -133,20 +187,36 @@ def run_suite(
 
             engine = engine_factory()
             report = run_engine(task.request, str(tmp_path), config, engine)
+            last_tests = report.attempts[-1].tests if report.attempts else None
 
             result = BenchmarkResult(
-                task_id=task.id, category=task.category, predicted_difficulty=report.difficulty.value,
-                predicted_band=report.difficulty.band, mode=report.difficulty.mode.value, status=report.status,
+                task_id=task.id, category=task.category, status=report.status,
+                validated=None, validation_message=None,
+                cost_usd=report.total_cost_usd, duration_ms=report.total_duration_ms,
+                claude_calls=len(report.attempts), retries=max(0, len(report.attempts) - 1),
                 quality_score=report.final_quality.score if report.final_quality else None,
-                claude_calls=len(report.attempts), cost_usd=report.total_cost_usd,
-                duration_ms=report.total_duration_ms,
+                tests_ran=bool(last_tests and last_tests.ran),
+                tests_passed=last_tests.passed if last_tests else 0,
+                tests_failed=last_tests.failed if last_tests else 0,
+                files_changed=len(report.files_changed),
+                predicted_difficulty=report.difficulty.value, predicted_band=report.difficulty.band,
+                confidence=report.difficulty.confidence, risk=report.difficulty.risk_level.value,
+                mode=report.difficulty.mode.value,
+                planning_used=report.difficulty.mode in (ExecutionMode.LIGHTWEIGHT, ExecutionMode.FULL),
             )
 
             if task.validate is not None:
                 try:
                     result.validated, result.validation_message = task.validate(tmp_path)
-                except OSError as exc:
-                    result.validated, result.validation_message = False, f"validation check itself failed: {exc}"
+                except Exception as exc:
+                    # Broad on purpose: a validator imports and executes the
+                    # (possibly broken) fixture code after an agent's edit --
+                    # a SyntaxError/ImportError/AttributeError there means
+                    # "the task genuinely failed," not "the validator has a
+                    # bug." Narrower exception types would let a broken
+                    # implementation crash the whole benchmark run instead
+                    # of correctly recording it as not validated.
+                    result.validated, result.validation_message = False, f"validation check raised {exc!r}"
 
             if compare and mode == "live":
                 with tempfile.TemporaryDirectory(prefix="codeexcellent-bench-raw-") as raw_tmp:
