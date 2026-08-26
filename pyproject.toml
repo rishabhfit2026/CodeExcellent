@@ -1,0 +1,19 @@
+[project]
+name = "codeexcellent"
+version = "0.1.0"
+description = "Resource-aware orchestration layer around the Claude CLI"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+codeexcellent = "codeexcellent.cli.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["codeexcellent*"]
+
+[tool.setuptools.package-data]
+"codeexcellent.config" = ["defaults.json"]

@@ -1,0 +1,46 @@
+{
+  "difficulty_bands": {
+    "trivial": [0, 2],
+    "easy": [2, 4],
+    "medium": [4, 6],
+    "hard": [6, 8],
+    "very_hard": [8, 10]
+  },
+  "scoring_weights": {
+    "task_complexity": 0.30,
+    "scope": 0.20,
+    "risk": 0.20,
+    "repo_complexity": 0.15,
+    "testing_complexity": 0.15
+  },
+  "planning_thresholds": {
+    "none_below": 3,
+    "lightweight_below": 6,
+    "full_at_or_above": 6
+  },
+  "budgets": {
+    "trivial": {"effort": "low", "max_budget_usd": 0.5, "max_claude_calls": 1, "max_retries": 0, "timeout_seconds": 180},
+    "easy": {"effort": "low", "max_budget_usd": 1.0, "max_claude_calls": 2, "max_retries": 1, "timeout_seconds": 240},
+    "medium": {"effort": "medium", "max_budget_usd": 3.0, "max_claude_calls": 3, "max_retries": 2, "timeout_seconds": 420},
+    "hard": {"effort": "high", "max_budget_usd": 8.0, "max_budget_usd_step": 4.0, "max_claude_calls": 5, "max_retries": 2, "timeout_seconds": 900},
+    "very_hard": {"effort": "max", "max_budget_usd": 20.0, "max_budget_usd_step": 8.0, "max_claude_calls": 8, "max_retries": 3, "timeout_seconds": 1800}
+  },
+  "quality": {
+    "min_pass_score": 7.0,
+    "use_claude_review_at_or_above_difficulty": 6
+  },
+  "claude": {
+    "permission_mode": "acceptEdits",
+    "allowed_tools": ["Read", "Edit", "Write", "Glob", "Grep"],
+    "model": null
+  },
+  "context": {
+    "max_files": 12,
+    "max_bytes_per_file": 4000,
+    "max_total_bytes": 16000
+  },
+  "repository": {
+    "max_files_scanned": 4000,
+    "ignored_dirs": [".git", "node_modules", "venv", ".venv", "__pycache__", "dist", "build", ".next", "target", ".mypy_cache", ".pytest_cache", "vendor", ".codeexcellent"]
+  }
+}
