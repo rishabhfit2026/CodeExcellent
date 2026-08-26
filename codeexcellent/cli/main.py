@@ -4,6 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from codeexcellent import __version__
 from codeexcellent.claude.claude_engine import ClaudeRunner
 from codeexcellent.config.settings import load_config
 from codeexcellent.core import memory, repository
@@ -267,11 +268,25 @@ def cmd_config(args: argparse.Namespace) -> int:
 
     from codeexcellent.config.settings import user_config_path
 
+    path = user_config_path()
+
+    if args.init:
+        if path.exists() and not args.yes:
+            answer = input(f"{path} already exists. Overwrite with an empty template? [y/N] ").strip().lower()
+            if answer != "y":
+                print("Aborted.")
+                return 1
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{\n  \"_comment\": \"Override any subset of defaults.json's keys here.\"\n}\n")
+        print(f"Created {path}")
+        return 0
+
     config = load_config()
     if args.show:
         print(json.dumps(config, indent=2))
     else:
-        print(f"User config path: {user_config_path()}")
+        print(f"User config path: {path}")
+        print(f"{'(exists)' if path.exists() else '(not created yet -- run `codeexcellent config --init`)'}")
         print("(Create this file with any subset of defaults.json's keys to override them.)")
     return 0
 
@@ -308,7 +323,8 @@ def build_parser() -> argparse.ArgumentParser:
     # which silently clobbers a value already set by an enclosing parser.
     # main() extracts --root itself in a separate pre-pass instead, so it
     # works whether it appears before or after the subcommand.
-    parser = argparse.ArgumentParser(prog="codeexcellent", description="Resource-aware orchestration layer around the Claude CLI")
+    parser = argparse.ArgumentParser(prog="codeexcellent", description="Adaptive, resource-aware orchestration layer around the Claude CLI")
+    parser.add_argument("-v", "--version", action="version", version=f"codeexcellent {__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
     run_parser = subparsers.add_parser("run", help="Execute a coding task")
@@ -327,8 +343,10 @@ def build_parser() -> argparse.ArgumentParser:
     history_parser.add_argument("--limit", type=int, default=20)
     history_parser.set_defaults(func=cmd_history)
 
-    config_parser = subparsers.add_parser("config", help="Show configuration")
+    config_parser = subparsers.add_parser("config", help="Show or scaffold configuration")
     config_parser.add_argument("--show", action="store_true", help="Print the fully merged configuration")
+    config_parser.add_argument("--init", action="store_true", help="Create a starter user config file at the user config path")
+    config_parser.add_argument("-y", "--yes", action="store_true", help="With --init, overwrite an existing user config without asking")
     config_parser.set_defaults(func=cmd_config)
 
     benchmark_parser = subparsers.add_parser("benchmark", help="Run the representative task benchmark suite")

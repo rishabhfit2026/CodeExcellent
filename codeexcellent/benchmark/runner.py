@@ -21,6 +21,7 @@ from typing import Callable
 from codeexcellent.benchmark.tasks import ALL_TASKS, BenchmarkTask
 from codeexcellent.claude.engine import CodingEngine
 from codeexcellent.core.engine import run as run_engine
+from codeexcellent.core.platform_utils import resolve_executable
 
 EngineFactory = Callable[[], CodingEngine]
 StepCallback = Callable[[str], None]
@@ -92,7 +93,7 @@ def run_raw(request: str, root: str, timeout_seconds: int = 300) -> tuple[bool, 
     """
     try:
         proc = subprocess.run(
-            ["claude", "-p", request, "--output-format", "json", "--permission-mode", "acceptEdits"],
+            [resolve_executable("claude"), "-p", request, "--output-format", "json", "--permission-mode", "acceptEdits"],
             cwd=root, capture_output=True, text=True, timeout=timeout_seconds,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):

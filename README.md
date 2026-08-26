@@ -45,21 +45,58 @@ that history feeds back into the next prediction for a similar task.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.10+ (Linux, macOS, or Windows — pure Python, no OS-specific code)
 - The `claude` CLI installed and authenticated (`claude --version` and
   `claude auth status` should both work — `codeexcellent doctor` checks
   both). CodeExcellent shells out to it; it does not call any API directly.
 
-## Setup
+## Installation
+
+**From PyPI** (once published):
+
+```bash
+pip install codeexcellent
+```
+
+**From source**, as a global command via [pipx](https://pipx.pypa.io) (recommended —
+isolates it from your other Python projects):
+
+```bash
+pipx install .
+```
+
+**From source**, into a virtualenv for development:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e .
-.venv/bin/pip install pytest   # only needed to run the test suite
+.venv/bin/pip install -e ".[dev]"   # editable install + pytest/build/twine
 ```
 
-Then either use `.venv/bin/codeexcellent`, or activate the venv
-(`source .venv/bin/activate`) and just use `codeexcellent`.
+Either way, `codeexcellent` becomes a global command (or `.venv/bin/codeexcellent`
+/ `source .venv/bin/activate && codeexcellent` for the venv install). Verify
+with `codeexcellent doctor`.
+
+**Uninstall:**
+
+```bash
+pipx uninstall codeexcellent   # if installed via pipx
+pip uninstall codeexcellent    # if installed via pip
+```
+
+This removes the package and the `codeexcellent` command cleanly. It does
+not touch `~/.codeexcellent/config.json` (your settings) or any project's
+`.codeexcellent/history.db` (your task history) — those are your data, not
+installation artifacts, and are left in place. Delete them manually if you
+want a fully clean slate.
+
+**Building a release** (for maintainers):
+
+```bash
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/python -m build          # produces dist/*.whl and dist/*.tar.gz
+.venv/bin/python -m twine check dist/*
+.venv/bin/python -m twine upload dist/*   # publish to PyPI
+```
 
 ## Usage
 
@@ -80,11 +117,15 @@ codeexcellent doctor
 # Past runs for the current project, including prediction-vs-reality
 codeexcellent history
 
-# Inspect merged configuration
+# Inspect merged configuration, or scaffold a starter override file
 codeexcellent config --show
+codeexcellent config --init
 
 # Representative task suite, zero-cost by default (see Benchmarking below)
 codeexcellent benchmark
+
+# Version
+codeexcellent --version
 ```
 
 `--root <path>` targets a different repository (works before or after the
@@ -273,20 +314,38 @@ scoring weights, planning thresholds, per-band budgets, quality thresholds
 confidence thresholds and margins, strategy planning cost, context/repo
 scan limits. Override any subset at `~/.codeexcellent/config.json` (or
 `$CODEEXCELLENT_CONFIG`) — only the keys you set are merged over the
-defaults.
+defaults. `codeexcellent config --init` scaffolds an empty starter file at
+that path; `codeexcellent config --show` prints the fully merged result.
+
+## Cross-platform notes
+
+CodeExcellent is pure Python with no OS-specific code paths, and is tested
+on Linux; macOS and Windows should work identically since every subprocess
+call resolves its executable explicitly (`core/platform_utils.py`) rather
+than assuming a Unix binary name or shell behavior — e.g. it runs tests with
+`sys.executable` rather than a hardcoded `python3`, and resolves commands
+like `npm` and `claude` to their full path so an npm-installed `.cmd`/`.ps1`
+shim on Windows is found the same way a `.exe`/`.sh` would be on Linux/macOS.
 
 ## Testing
 
 ```bash
+.venv/bin/pip install -e ".[dev]"
 .venv/bin/pytest -q
 ```
 
-All 74 tests run against a mocked `CodingEngine`/`subprocess.run` and a
+All 80 tests run against a mocked `CodingEngine`/`subprocess.run` and a
 temp-directory SQLite history — no Claude subscription or API access is
 required, and nothing shells out to the real `claude` binary during the
-test suite. Beyond the unit suite, the pipeline has also been verified
-against the real Claude CLI end-to-end (trivial and CRITICAL-risk tasks via
-`analyze`, a real `run` against a scratch repo).
+test suite. This includes packaging tests (`tests/test_packaging.py`) that
+check the entry point, version wiring, and license file, and cross-platform
+executable-resolution tests (`tests/test_platform_utils.py`,
+`tests/test_test_runner.py`). Beyond the unit suite, the pipeline has also
+been verified against the real Claude CLI end-to-end (trivial and
+CRITICAL-risk tasks via `analyze`, a real `run` against a scratch repo), and
+the packaging itself has been verified by building the sdist/wheel
+(`python -m build`, `twine check`) and installing/uninstalling both into a
+throwaway virtualenv from scratch.
 
 ## Current scope / what's next
 
@@ -299,3 +358,11 @@ avoid overengineering: an actual ML difficulty model (the spec explicitly
 asks for statistical blending first, and there isn't yet enough real
 project history to justify more), and a second `CodingEngine`
 implementation to prove out the abstraction beyond Claude.
+
+Packaging (this release): PyPI-ready `pyproject.toml` with full metadata,
+an MIT license, a global `codeexcellent` command verified via a from-scratch
+build/install/uninstall cycle, `--version`, `config --init`, and explicit
+cross-platform executable resolution. None of this touched the orchestration
+logic in `core/`, `analyzer/`, `budget/`, or `quality/` — it's packaging and
+execution-mechanics work only. See [CHANGELOG.md](CHANGELOG.md) for the
+version history.

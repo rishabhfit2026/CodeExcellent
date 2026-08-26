@@ -1,16 +1,52 @@
 [project]
 name = "codeexcellent"
-version = "0.1.0"
-description = "Resource-aware orchestration layer around the Claude CLI"
+dynamic = ["version"]
+description = "Adaptive, resource-aware orchestration layer around the Claude CLI"
+readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Rishabh Singh", email = "jeelife99@gmail.com" },
+]
+keywords = [
+    "claude", "claude-code", "cli", "ai", "agent", "orchestration",
+    "coding-assistant", "developer-tools",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Utilities",
+]
 dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "build>=1", "twine>=5"]
+
+[project.urls]
+Homepage = "https://github.com/rishabhfit2026/CodeExcellent"
+Repository = "https://github.com/rishabhfit2026/CodeExcellent"
+Issues = "https://github.com/rishabhfit2026/CodeExcellent/issues"
 
 [project.scripts]
 codeexcellent = "codeexcellent.cli.main:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = { attr = "codeexcellent.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["codeexcellent*"]

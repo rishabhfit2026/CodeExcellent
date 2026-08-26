@@ -51,7 +51,12 @@ def test_command_includes_confirmed_flags_only():
         runner.execute("task", cwd="/tmp", budget=BUDGET)
 
     cmd = mock_run.call_args.args[0]
-    assert cmd[0] == "claude"
+    # The binary is resolved to its full path (cross-platform: on Windows an
+    # npm-installed CLI needs the ".cmd"/".ps1" extension, which a bare-name
+    # subprocess launch won't find) -- only the basename is still "claude".
+    from pathlib import Path
+
+    assert Path(cmd[0]).stem == "claude"
     assert "-p" in cmd
     assert "--effort" in cmd and "low" in cmd
     assert "--max-budget-usd" in cmd and "0.5" in cmd

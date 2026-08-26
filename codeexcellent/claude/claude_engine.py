@@ -13,6 +13,7 @@ import subprocess
 
 from codeexcellent.claude.engine import CodingEngine
 from codeexcellent.core.models import Budget, ClaudeCallResult
+from codeexcellent.core.platform_utils import resolve_executable
 
 logger = logging.getLogger("codeexcellent.claude")
 
@@ -30,8 +31,11 @@ class ClaudeRunner(CodingEngine):
         if not path:
             return False, f"'{self.binary}' not found on PATH"
         try:
+            # Use the resolved path, not the bare name: on Windows an npm-
+            # installed CLI is a ".cmd"/".ps1" shim that `shutil.which` finds
+            # but a bare-name subprocess launch (no shell) will not.
             result = subprocess.run(
-                [self.binary, "--version"], capture_output=True, text=True, timeout=10,
+                [path, "--version"], capture_output=True, text=True, timeout=10,
             )
             return True, result.stdout.strip() or result.stderr.strip()
         except (subprocess.TimeoutExpired, OSError) as exc:
@@ -44,7 +48,7 @@ class ClaudeRunner(CodingEngine):
         """
         try:
             result = subprocess.run(
-                [self.binary, "auth", "status"], capture_output=True, text=True, timeout=10,
+                [resolve_executable(self.binary), "auth", "status"], capture_output=True, text=True, timeout=10,
             )
             return json.loads(result.stdout)
         except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
@@ -58,7 +62,7 @@ class ClaudeRunner(CodingEngine):
         session_id: str | None,
         allowed_tools: list[str] | None,
     ) -> list[str]:
-        cmd = [self.binary, "-p", prompt, "--output-format", "json"]
+        cmd = [resolve_executable(self.binary), "-p", prompt, "--output-format", "json"]
         cmd += ["--effort", budget.effort]
         cmd += ["--max-budget-usd", str(budget.max_budget_usd)]
         cmd += ["--permission-mode", self.permission_mode]
