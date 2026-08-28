@@ -21,7 +21,7 @@ from typing import Callable
 from codeexcellent.analyzer import adaptive_estimator, difficulty_scorer, fingerprint, strategy_selector, task_analyzer
 from codeexcellent.budget import budget_manager, resource_forecaster
 from codeexcellent.claude.engine import CodingEngine
-from codeexcellent.core import context, git_safety, memory, outcome, prompts, repository, test_runner
+from codeexcellent.core import context, failure_classifier, git_safety, memory, outcome, prompts, repository, test_runner
 from codeexcellent.core.models import (
     ExecutionAttempt,
     ExecutionMode,
@@ -132,7 +132,7 @@ def plan(request: str, root: str, config: dict, on_step: StepCallback | None = N
     difficulty = adaptive_estimator.estimate(task, repo, heuristic_difficulty, root, config)
 
     task_fingerprint = fingerprint.build(task, repo, difficulty)
-    mode, strategy_reasons = strategy_selector.select(task, difficulty, config)
+    mode, strategy_reasons = strategy_selector.select(task, difficulty, config, repo)
     difficulty.mode = mode
     difficulty.planning_required = mode in (ExecutionMode.LIGHTWEIGHT, ExecutionMode.FULL)
     difficulty.reasons = [*difficulty.reasons, *strategy_reasons]
@@ -220,7 +220,7 @@ def run(
 
     base_prompt = prompts.implementation_prompt(request, context_text, difficulty, plan=plan_text)
     min_pass = quality_checker.min_pass_score_for(difficulty, config)
-    needs_review = quality_checker.review_required(difficulty, config)
+    needs_review = quality_checker.review_required(difficulty, difficulty.mode, config)
 
     attempts: list[ExecutionAttempt] = []
     session_id: str | None = None
@@ -240,7 +240,14 @@ def run(
             if attempt_number == 1:
                 prompt = base_prompt
             else:
-                prompt = build_retry_prompt(request, attempts[-1].call, attempts[-1].tests, attempts[-1].quality)
+                previous = attempts[-1]
+                previous_failure_class = (
+                    failure_classifier.FailureClass(previous.failure_class) if previous.failure_class else None
+                )
+                prompt = build_retry_prompt(
+                    request, previous.call, previous.tests, previous.quality,
+                    failure_class=previous_failure_class, changed_files=previous.changed_files,
+                )
 
             call = engine.execute(prompt, root, current_budget, session_id=session_id)
             session_id = call.session_id or session_id
@@ -258,7 +265,7 @@ def run(
             else:
                 tests = SuiteRunResult(ran=False, success=True, output_tail="Testing not required for this task.")
 
-            quality = quality_checker.heuristic_check(difficulty, call, tests, changed, min_pass)
+            quality = quality_checker.heuristic_check(difficulty, call, tests, changed, min_pass, task=task, config=config)
 
             if call.success and needs_review and attempt_number < current_budget.max_claude_calls:
                 on_step("Running quality review...")
@@ -274,7 +281,11 @@ def run(
                 if reviewed:
                     quality = reviewed
 
-            attempts.append(ExecutionAttempt(call=call, tests=tests, quality=quality, changed_files=changed))
+            fclass = failure_classifier.classify(task, call, tests, changed, quality, config)
+            attempts.append(ExecutionAttempt(
+                call=call, tests=tests, quality=quality, changed_files=changed,
+                failure_class=fclass.value if fclass != failure_classifier.FailureClass.NONE else None,
+            ))
 
             decision = decide(quality, attempt_number, current_budget, cost_so_far, call.success)
             on_step(decision.reason)
@@ -288,7 +299,17 @@ def run(
                 break
 
             escalation_reasons.append(decision.reason)
-            current_budget = budget_manager.escalate(current_budget, config)
+            # Validation-driven recovery: only pay for a bigger budget/effort
+            # band on the next attempt when the diagnosed failure actually
+            # suggests resources were the bottleneck (a tooling/timeout
+            # failure, or one we couldn't diagnose at all). A diagnosed,
+            # targetable gap (structural/test/implementation) gets a
+            # targeted retry prompt at the *same* budget instead -- escalating
+            # unconditionally on every retry was a real, measured source of
+            # cost that a live A/B benchmark showed didn't improve validated
+            # correctness.
+            if failure_classifier.warrants_budget_escalation(fclass):
+                current_budget = budget_manager.escalate(current_budget, config)
     except KeyboardInterrupt:
         status = "CANCELLED"
         cancelled = True

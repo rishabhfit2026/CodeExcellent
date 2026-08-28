@@ -1,11 +1,13 @@
 """Quality gating. Cheap heuristics run every time (git diff shape, whether
-tests passed, scope discipline) so a one-line change never pays for a Claude
-review call. A structured Claude review (via --json-schema) is only used for
-harder/riskier tasks, gated by config.
+tests passed, scope discipline, structural completeness) so a one-line
+change never pays for a Claude review call. A structured Claude review
+(via --json-schema) is only used when the execution strategy itself called
+for one, or the task's risk makes it mandatory regardless of strategy --
+see `review_required`.
 """
 from __future__ import annotations
 
-from codeexcellent.core.models import ClaudeCallResult, DifficultyScore, QualityResult, SuiteRunResult
+from codeexcellent.core.models import ClaudeCallResult, DifficultyScore, ExecutionMode, QualityResult, SuiteRunResult, TaskAnalysis
 
 REVIEW_JSON_SCHEMA = {
     "type": "object",
@@ -29,15 +31,25 @@ def min_pass_score_for(difficulty: DifficultyScore, config: dict) -> float:
     return float(by_level.get(difficulty.quality_level.value, default))
 
 
-def review_required(difficulty: DifficultyScore, config: dict) -> bool:
-    """Whether a structured Claude review call is warranted: either the task
-    is difficult enough that a review adds real value, or its quality level
-    makes review mandatory regardless of difficulty (section 18).
+def review_required(difficulty: DifficultyScore, mode: ExecutionMode, config: dict) -> bool:
+    """Whether a structured Claude review call is warranted.
+
+    This used to also independently trigger at `difficulty.value >= 6`,
+    regardless of the execution mode `strategy_selector` had already chosen
+    -- which meant a `lightweight` task above that threshold paid for a
+    review call the strategy layer never asked for, stacking cost on top of
+    (and sometimes in tension with) the mode decision. A live A/B benchmark
+    traced part of the cost increase from stricter difficulty scoring to
+    exactly this duplication. `mode` is now the single source of truth for
+    "does this task's *process* call for a review" -- quality_level's
+    mandatory-review list remains a separate, risk-driven reason a review is
+    required even at a cheap mode (a CRITICAL one-line change still gets
+    reviewed).
     """
     quality_cfg = config.get("quality", {})
     if difficulty.quality_level.value in quality_cfg.get("mandatory_review_levels", []):
         return True
-    return difficulty.value >= quality_cfg.get("use_claude_review_at_or_above_difficulty", 6)
+    return mode in (ExecutionMode.FULL, ExecutionMode.REVIEW_REQUIRED)
 
 
 def heuristic_check(
@@ -46,6 +58,8 @@ def heuristic_check(
     tests: SuiteRunResult,
     changed_files: list[str],
     min_pass_score: float,
+    task: TaskAnalysis | None = None,
+    config: dict | None = None,
 ) -> QualityResult:
     if not call.success:
         return QualityResult(score=0.0, complete=False, needs_more_work=True, issues=[call.error or "Claude call failed"])
@@ -61,6 +75,18 @@ def heuristic_check(
     if len(changed_files) > limit:
         issues.append(f"Changed {len(changed_files)} files, more than expected for a {difficulty.estimated_scope} scope task")
         score -= 2.0
+
+    if task is not None and changed_files:
+        recovery_cfg = (config or {}).get("recovery", {})
+        structural_signal = max(task.architecture_signal, task.cross_module_signal)
+        signal_threshold = float(recovery_cfg.get("structural_incomplete_signal_at_or_above", 6.0))
+        max_files = int(recovery_cfg.get("structural_incomplete_max_files_changed", 1))
+        if structural_signal >= signal_threshold and len(changed_files) <= max_files:
+            issues.append(
+                f"Request implies a structural/multi-module change (signal={structural_signal}/10), "
+                f"but only {len(changed_files)} file(s) changed -- implementation may be incomplete"
+            )
+            score -= 3.0
 
     if difficulty.testing_required:
         if not tests.ran:

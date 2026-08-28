@@ -196,6 +196,8 @@ def _print_benchmark_report(report) -> None:
             line += f"  | validated={'yes' if r.validated else 'no (' + (r.validation_message or '') + ')'}"
         if r.raw_cost_usd is not None:
             line += f"  | raw: cost=${r.raw_cost_usd} success={r.raw_success}"
+            if r.raw_num_turns is not None:
+                line += f" num_turns={r.raw_num_turns}"
             if r.raw_validated is not None:
                 line += f" validated={'yes' if r.raw_validated else 'no'}"
         print(line)

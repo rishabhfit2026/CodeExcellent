@@ -414,6 +414,65 @@ data. It's also exactly the gap the adaptive estimator is positioned to
 close over time from real history, once a project has run enough similar
 tasks.
 
+### Live benchmark results (measured, 2026-08-26)
+
+A real `--live --compare` run on the 5 easiest, most reliably-validated
+tasks (the 3 trivial tasks plus `easy_validation`/`easy_helper` — all with
+behaviorally-verified `validate()` functions that had already passed
+baseline-fail/correct-pass/incorrect-fail testing). Each task ran twice from
+an identical starting fixture, in separate isolated directories: raw
+`claude -p` with no orchestration, and `codeexcellent` end-to-end. This was
+a measurement-only run — no orchestration logic was changed before or
+because of it, and none of these numbers have been used to tune anything.
+
+| Task | Predicted difficulty | Confidence | Risk | Strategy | Planning used | CE calls/retries | CE cost | CE duration | Raw cost | Raw duration | CE validated | Raw validated |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| trivial_rename | 0.68 (trivial) | 0.75 | low | direct | no | 1 / 0 | $0.0496 | 7,122ms | $0.0608 | 12,921ms | ✅ | ✅ |
+| trivial_typo | 1.12 (trivial) | 0.75 | low | direct | no | 1 / 0 | $0.0492 | 6,882ms | $0.0535 | 12,686ms | ✅ | ✅ |
+| trivial_constant | 1.63 (trivial) | 0.75 | low | direct | no | 1 / 0 | $0.0494 | 6,760ms | $0.0605 | 12,036ms | ✅ | ✅ |
+| easy_validation | 1.36 (trivial†) | 0.75 | low | direct | no | 1 / 0 | $0.0496 | 7,366ms | $0.0616 | 24,516ms | ✅ | ✅ |
+| easy_helper | 2.08 (easy) | 0.75 | low | direct | no | 1 / 0 | $0.0498 | 6,413ms | $0.0616 | 13,350ms | ✅ | ✅ |
+
+† `easy_validation` is filed in the "easy" benchmark category, but the
+heuristic scorer itself predicted the "trivial" band on this run — the same
+labels-vs-reality gap noted above, reproduced here on live data.
+
+No task in this batch triggered `testing_required`, so tests_passed/failed
+aren't reported here (not applicable, not 0/0 — that would misleadingly
+imply tests ran and none passed).
+
+**Aggregates:**
+
+| | CodeExcellent | Raw Claude |
+|---|---|---|
+| Correctness | 5/5 | 5/5 |
+| Validated pass rate | 100% | 100% |
+| Total cost | $0.2476 | $0.2981 |
+| Avg cost/task | $0.0495 | $0.0596 |
+| Avg duration/task | 6,909ms | 15,102ms |
+| Avg quality score | 10.0/10 | n/a (not scored) |
+
+**What this does and doesn't show:**
+- Both systems got all 5 tasks correct on this sample — n=5 is too small to
+  conclude anything about relative correctness in general; it only shows
+  both work on simple tasks.
+- CodeExcellent was cheaper (~17% less total cost) and faster (~54% less
+  average duration) than calling Claude directly on every single task in
+  this batch. These are real measured differences, not estimates — but they
+  are five simple, `direct`-strategy tasks; CodeExcellent's planning/review/
+  retry machinery never activated here, so this says nothing about
+  medium/hard/very_hard tasks where it would.
+- Two configuration differences are known, not speculative: CodeExcellent
+  sets `--effort low` for trivial-band tasks and sends a curated context;
+  raw Claude uses CLI defaults for both. Turn counts, context size actually
+  consumed, and token counts were not captured for either side, so *why*
+  the gap exists isn't confirmed here — only that it exists in this sample.
+- Raw Claude's internal call/turn count isn't captured by `run_raw` (a
+  single CLI invocation isn't decomposed into "calls" the way
+  CodeExcellent's orchestration loop is), so `claude_calls`/`retries` are
+  CodeExcellent-side-only metrics as measured — not a like-for-like
+  comparison point.
+
 ## Configuration
 
 Defaults live in `codeexcellent/config/defaults.json`: difficulty bands,

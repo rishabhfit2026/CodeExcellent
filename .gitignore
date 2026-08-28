@@ -9,3 +9,5 @@ dist/
 build/
 *.whl
 *.tar.gz
+benchmarks/*.json
+benchmarks/*.txt

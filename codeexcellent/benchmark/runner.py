@@ -60,6 +60,7 @@ class BenchmarkResult:
     raw_cost_usd: float | None = None
     raw_duration_ms: int | None = None
     raw_success: bool | None = None
+    raw_num_turns: int | None = None  # the CLI's own reported turn count -- NOT comparable to claude_calls, see run_raw
     raw_validated: bool | None = None  # CORRECTNESS (raw side): same validate() run against the raw-Claude output
     raw_validation_message: str | None = None
 
@@ -149,6 +150,15 @@ class BenchmarkReport:
 
 
 def _init_fixture_repo(task: BenchmarkTask, tmp_dir: Path) -> None:
+    # A minimal Python project marker -- discovered missing during a live
+    # broad benchmark run: without it, `repository.analyze()` never puts
+    # "python" in project_types, so `test_runner._detect_command()` never
+    # matches and CodeExcellent's own internal test-running quality gate is
+    # structurally inert for every benchmark task, including ones
+    # explicitly about adding tests (e.g. medium_add_tests). None of the 16
+    # task fixtures need to change individually -- this is the one place
+    # all of them are materialized.
+    (tmp_dir / "pyproject.toml").write_text('[project]\nname = "fixture"\n')
     task.fixture(tmp_dir)
     if shutil.which("git"):
         subprocess.run(["git", "init", "-q"], cwd=tmp_dir, capture_output=True)
@@ -160,11 +170,20 @@ def _init_fixture_repo(task: BenchmarkTask, tmp_dir: Path) -> None:
         )
 
 
-def run_raw(request: str, root: str, timeout_seconds: int = 300) -> tuple[bool, float, int]:
+def run_raw(request: str, root: str, timeout_seconds: int = 300) -> tuple[bool, float, int, int | None]:
     """Calls Claude directly with no CodeExcellent orchestration -- no
-    context curation, no effort/budget tuning, a single call. This is the
-    "just use Claude directly" side of the A/B comparison (section 21).
-    Returns (success, cost_usd, duration_ms).
+    context curation, no effort/budget tuning, a single CLI invocation. This
+    is the "just use Claude directly" side of the A/B comparison.
+    Returns (success, cost_usd, duration_ms, num_turns).
+
+    num_turns is the CLI's own reported turn count for this invocation --
+    real data it exposes, not a fabricated call count. It is NOT the same
+    metric as CodeExcellent's `claude_calls` (which counts separate CLI
+    invocations across the orchestration loop): a single `claude -p` call
+    can span multiple turns internally (e.g. tool-use round-trips) while
+    still being exactly one invocation. Returned as None, not 0, if the CLI
+    output doesn't include it, so a caller can't mistake "not reported" for
+    "reported as zero."
     """
     try:
         proc = subprocess.run(
@@ -172,13 +191,19 @@ def run_raw(request: str, root: str, timeout_seconds: int = 300) -> tuple[bool, 
             cwd=root, capture_output=True, text=True, timeout=timeout_seconds,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        return False, 0.0, timeout_seconds * 1000
+        return False, 0.0, timeout_seconds * 1000, None
 
     try:
         data = json.loads(proc.stdout)
-        return not data.get("is_error", True), float(data.get("total_cost_usd", 0.0)), int(data.get("duration_ms", 0))
+        num_turns = data.get("num_turns")
+        return (
+            not data.get("is_error", True),
+            float(data.get("total_cost_usd", 0.0)),
+            int(data.get("duration_ms", 0)),
+            int(num_turns) if num_turns is not None else None,
+        )
     except (json.JSONDecodeError, ValueError):
-        return False, 0.0, 0
+        return False, 0.0, 0, None
 
 
 def run_suite(
@@ -237,10 +262,11 @@ def run_suite(
                     raw_path = Path(raw_tmp)
                     _init_fixture_repo(task, raw_path)
                     start = time.time()
-                    success, cost, duration_ms = run_raw(task.request, str(raw_path))
+                    success, cost, duration_ms, num_turns = run_raw(task.request, str(raw_path))
                     result.raw_success = success
                     result.raw_cost_usd = cost
                     result.raw_duration_ms = duration_ms or int((time.time() - start) * 1000)
+                    result.raw_num_turns = num_turns
 
                     if task.validate is not None:
                         try:

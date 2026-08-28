@@ -116,6 +116,34 @@ def test_run_suite_reports_predicted_difficulty_and_mode():
     assert result.claude_calls >= 1
 
 
+def test_fixture_repos_are_recognized_as_python_projects(tmp_path):
+    # Regression: a live broad benchmark run found every fixture lacked a
+    # pyproject.toml/setup.py/requirements.txt marker, so
+    # repository.analyze() never put "python" in project_types --
+    # meaning test_runner's own `"python" in repo.project_types` check
+    # never matched, and CodeExcellent's internal test-running quality gate
+    # was structurally inert for every benchmark task, including ones
+    # explicitly about adding tests (e.g. medium_add_tests).
+    from codeexcellent.core import repository
+
+    runner._init_fixture_repo(_rename_task(), tmp_path)
+    repo = repository.analyze(str(tmp_path), CONFIG)
+    assert "python" in repo.project_types
+
+
+def test_medium_add_tests_fixture_is_now_detectable_by_the_real_test_runner(tmp_path):
+    from codeexcellent.benchmark.tasks import ALL_TASKS
+    from codeexcellent.core import repository, test_runner
+
+    task = next(t for t in ALL_TASKS if t.id == "medium_add_tests")
+    runner._init_fixture_repo(task, tmp_path)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_calculator.py").write_text("def test_x():\n    assert True\n")
+
+    repo = repository.analyze(str(tmp_path), CONFIG)
+    assert test_runner._detect_command(repo) is not None
+
+
 # --- phase 9: isolation ------------------------------------------------------
 
 class _MarkerEngine(CodingEngine):
@@ -163,7 +191,7 @@ def test_compare_mode_runs_codeexcellent_and_raw_in_separate_directories(monkeyp
         # If isolation were broken, the CodeExcellent run's marker file
         # would already exist here.
         assert not (Path(root) / "marker.txt").exists()
-        return True, 0.05, 500
+        return True, 0.05, 500, 3
 
     monkeypatch.setattr(runner, "run_raw", _fake_run_raw)
     report = runner.run_suite(CONFIG, lambda: engine, "live", tasks=[_rename_task()], compare=True)
@@ -171,6 +199,36 @@ def test_compare_mode_runs_codeexcellent_and_raw_in_separate_directories(monkeyp
     assert len(raw_dirs_seen) == 1
     assert raw_dirs_seen[0] not in engine.dirs_used  # genuinely different directory
     assert report.results[0].raw_cost_usd == 0.05
+    assert report.results[0].raw_num_turns == 3
+
+
+def test_run_raw_reports_num_turns_from_the_cli_when_present():
+    import json as _json
+    from unittest.mock import patch
+
+    payload = {"is_error": False, "total_cost_usd": 0.02, "duration_ms": 500, "num_turns": 4}
+    with patch("subprocess.run", return_value=_completed(stdout=_json.dumps(payload))):
+        success, cost, duration_ms, num_turns = runner.run_raw("do something", ".")
+    assert success is True
+    assert num_turns == 4
+
+
+def test_run_raw_reports_none_not_zero_when_the_cli_omits_num_turns():
+    # A missing field must not be silently reported as "0 turns" -- that
+    # would be indistinguishable from a genuinely-reported zero.
+    import json as _json
+    from unittest.mock import patch
+
+    payload = {"is_error": False, "total_cost_usd": 0.02, "duration_ms": 500}
+    with patch("subprocess.run", return_value=_completed(stdout=_json.dumps(payload))):
+        _, _, _, num_turns = runner.run_raw("do something", ".")
+    assert num_turns is None
+
+
+def _completed(stdout="", returncode=0):
+    import subprocess as _subprocess
+
+    return _subprocess.CompletedProcess(args=["claude"], returncode=returncode, stdout=stdout, stderr="")
 
 
 def test_compare_mode_validates_the_raw_run_output_too(monkeypatch):
@@ -179,7 +237,7 @@ def test_compare_mode_validates_the_raw_run_output_too(monkeypatch):
     # "validated correctness" can't actually be compared between the two.
     def _fake_run_raw_writes_correct_fix(request, root, timeout_seconds=300):
         (Path(root) / "greet.py").write_text('def greet(name):\n    return "Hello, " + name\n')
-        return True, 0.03, 400
+        return True, 0.03, 400, 2
 
     monkeypatch.setattr(runner, "run_raw", _fake_run_raw_writes_correct_fix)
     report = runner.run_suite(CONFIG, MockBenchmarkEngine, "live", tasks=[_rename_task()], compare=True)
@@ -194,7 +252,7 @@ def test_compare_mode_validates_the_raw_run_output_too(monkeypatch):
 
 def test_compare_totals_reports_both_sides_validated_pass_rate(monkeypatch):
     def _fake_run_raw_fails(request, root, timeout_seconds=300):
-        return True, 0.03, 400  # doesn't touch greet.py -- validate() will fail
+        return True, 0.03, 400, 1  # doesn't touch greet.py -- validate() will fail
 
     monkeypatch.setattr(runner, "run_raw", _fake_run_raw_fails)
     report = runner.run_suite(

@@ -56,6 +56,7 @@ class TaskAnalysis:
     operation_count: int
     keywords_matched: list[str] = field(default_factory=list)
     category: str = "general"  # rename_or_typo / small_change / large_refactor / general
+    cross_module_signal: float = 0.0  # 0-10 -- distinct file/module references beyond the first (section: adaptive difficulty audit)
 
 
 @dataclass
@@ -197,6 +198,7 @@ class ExecutionAttempt:
     tests: SuiteRunResult
     quality: QualityResult
     changed_files: list[str] = field(default_factory=list)
+    failure_class: str | None = None  # see core/failure_classifier.py -- None when the attempt passed
 
 
 @dataclass

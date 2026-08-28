@@ -554,6 +554,18 @@ def _validate_very_hard_cross_module_redesign(root: Path) -> tuple[bool, str]:
     # pattern is the right tool (not a superficial text match -- it's the
     # literal definition of the requested change), paired with a behavioral
     # check that stock adjustment still works correctly.
+    #
+    # The behavioral half seeds/reads stock through inventory.adjust() --
+    # the fixture's OWN public function -- rather than touching
+    # inventory.STOCK directly, even from the validator. A live benchmark
+    # run found this the hard way: a real Claude implementation restructured
+    # inventory.py's internals (dropping the module-level STOCK dict
+    # entirely) while still exposing adjust() as instructed, which is a
+    # legitimate interpretation of "introduce a clean interface" -- the
+    # task only requires orders.py not to reach into STOCK, never that
+    # inventory.py keep STOCK as its own internal representation. The old
+    # validator crashed with AttributeError on that implementation, which
+    # would have been indistinguishable from a genuine failure.
     orders_src = _read(root, "orders.py")
     if re.search(r"inventory\s*\.\s*STOCK", orders_src):
         return False, "orders.py still reaches into inventory.STOCK directly"
@@ -566,14 +578,17 @@ def _validate_very_hard_cross_module_redesign(root: Path) -> tuple[bool, str]:
             return False, f"orders.py/inventory.py failed to import: {exc!r}"
         if not hasattr(orders, "place_order"):
             return False, "place_order no longer exists"
+        if not hasattr(inventory, "adjust"):
+            return False, "inventory.adjust() no longer exists -- validator relies on the fixture's own public interface"
 
-        inventory.STOCK["sku-1"] = 10
         try:
+            inventory.adjust("sku-1", 10)  # seed initial stock via the public interface
             result = orders.place_order("sku-1", 3)
+            current = inventory.adjust("sku-1", 0)  # read back without mutating, via the same interface
         except Exception as exc:
-            return False, f"place_order() raised {exc!r}"
-        if inventory.STOCK.get("sku-1") != 7:
-            return False, f"placing an order did not correctly decrement stock (STOCK={inventory.STOCK!r})"
+            return False, f"place_order()/adjust() raised {exc!r}"
+        if current != 7:
+            return False, f"stock level after the order is {current!r} (via inventory.adjust), expected 7"
         if result != 7:
             return False, f"place_order() returned {result!r}, expected the new stock level 7"
     return True, "orders.py no longer touches inventory.STOCK directly; stock adjustment behavior is preserved"

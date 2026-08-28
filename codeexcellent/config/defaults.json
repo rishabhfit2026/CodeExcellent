@@ -7,11 +7,22 @@
     "very_hard": [8, 10]
   },
   "scoring_weights": {
-    "task_complexity": 0.30,
-    "scope": 0.20,
-    "risk": 0.20,
-    "repo_complexity": 0.15,
-    "testing_complexity": 0.15
+    "task_complexity": 0.25,
+    "scope": 0.15,
+    "risk": 0.15,
+    "architecture_signal": 0.15,
+    "cross_module_signal": 0.15,
+    "repo_complexity": 0.10,
+    "testing_complexity": 0.05
+  },
+  "difficulty_floor": {
+    "_comment": "A blind weighted average can dilute a genuinely strong signal in one dimension with near-zero unrelated dimensions (e.g. a real architecture migration where risk/repo_complexity happen to be low). Mirrors the existing risk-floor pattern: when the top two complexity-relevant dimensions (task_complexity/scope/architecture_signal/cross_module_signal) are both high, floor the blended score up -- same mechanism as the risk floor, applied to complexity instead of risk, and kept fully separate from it.",
+    "tiers": [
+      {"top2_avg_at_or_above": 9.0, "floor": 7.5},
+      {"top2_avg_at_or_above": 7.5, "floor": 6.5},
+      {"top2_avg_at_or_above": 6.0, "floor": 5.0},
+      {"top2_avg_at_or_above": 4.5, "floor": 3.5}
+    ]
   },
   "planning_thresholds": {
     "none_below": 3,
@@ -27,7 +38,6 @@
   },
   "quality": {
     "min_pass_score": 7.0,
-    "use_claude_review_at_or_above_difficulty": 6,
     "min_pass_score_by_level": {
       "trivial": 5.0,
       "basic": 6.0,
@@ -61,10 +71,30 @@
     "low_threshold": 0.5,
     "high_threshold": 0.8,
     "low_confidence_budget_margin": 0.4,
-    "low_confidence_call_margin": 1
+    "low_confidence_call_margin": 1,
+    "dimension_spread_penalty": {
+      "_comment": "Dimensions that strongly disagree with each other (e.g. task_complexity=10 while risk=0) is itself evidence of uncertainty about the true difficulty, not evidence of low difficulty. Penalty subtracted from the base confidence, by population-stdev of the blended dimensions.",
+      "high_spread_at_or_above": 3.5,
+      "high_spread_penalty": 0.20,
+      "moderate_spread_at_or_above": 2.0,
+      "moderate_spread_penalty": 0.10
+    },
+    "floor_override_penalty": 0.10
   },
   "strategy": {
     "planning_cost": 1.5,
-    "critical_forces_review": true
+    "critical_forces_review": true,
+    "low_confidence_forces_at_least": "lightweight_plan_implement_test",
+    "relevant_files_min_count": 2,
+    "relevant_files_max_count": 6,
+    "relevant_files_benefit_per_file": 0.5,
+    "relevant_files_benefit_cap": 2.0,
+    "full_requires_confidence_below": 0.5,
+    "full_requires_structural_signal_at_or_above": 7.0
+  },
+  "recovery": {
+    "_comment": "Validation-driven recovery (added after a live A/B benchmark showed escalating strategy on difficulty alone increased cost without improving validated correctness). structural_incomplete_* general-purpose thresholds feed both the heuristic quality check and failure_classifier -- kept in one place so the two never disagree about what counts as a suspiciously small change for a structurally-signaled task.",
+    "structural_incomplete_signal_at_or_above": 6.0,
+    "structural_incomplete_max_files_changed": 1
   }
 }

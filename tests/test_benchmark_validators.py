@@ -523,6 +523,32 @@ def test_very_hard_cross_module_redesign_incorrect_fails_when_still_coupled(tmp_
     assert passed is False, msg
 
 
+def test_very_hard_cross_module_redesign_accepts_an_inventory_that_dropped_its_own_stock_dict(tmp_path):
+    # Regression: a live benchmark run found a real Claude implementation
+    # that restructured inventory.py's internals (no module-level STOCK
+    # dict at all -- e.g. a class-based store) while still exposing
+    # adjust() as instructed. That's a legitimate "clean interface" -- the
+    # task only requires orders.py not to reach into STOCK, never that
+    # inventory.py keep STOCK as its own representation. The old validator,
+    # which read inventory.STOCK directly, crashed with AttributeError on
+    # this -- indistinguishable from a genuine failure.
+    task = _task("very_hard_cross_module_redesign")
+    task.fixture(tmp_path)
+    _apply(
+        tmp_path, "inventory.py",
+        "class _Store:\n"
+        "    def __init__(self):\n        self._levels = {}\n\n"
+        "    def adjust(self, sku, delta):\n"
+        "        self._levels[sku] = self._levels.get(sku, 0) + delta\n"
+        "        return self._levels[sku]\n\n\n"
+        "_store = _Store()\n\n\n"
+        "def adjust(sku, delta):\n    return _store.adjust(sku, delta)\n",
+    )
+    _apply(tmp_path, "orders.py", _CROSS_MODULE_CORRECT)
+    passed, msg = task.validate(tmp_path)
+    assert passed is True, msg
+
+
 # --- tasks that deliberately have no validator ------------------------------
 
 def test_undocumented_tasks_have_no_validator_and_it_is_explained_why():
