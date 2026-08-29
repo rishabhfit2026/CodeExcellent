@@ -84,3 +84,29 @@ def test_architecture_vocabulary_covers_module_and_data_flow_terms():
 
     pipeline_task = task_analyzer.analyze("Change the pipeline to process records in batches")
     assert pipeline_task.architecture_signal > 0
+
+
+def test_greeting_is_recognized_as_chitchat_not_a_coding_task():
+    # Regression: typing a plain greeting into the interactive REPL scored
+    # as a valid low-difficulty task and spent a real Claude call trying to
+    # "implement" it, then reported a confusing INCOMPLETE failure.
+    for text in ["hey how are you", "hi there", "hello!", "what's up", "thanks!", "ok cool"]:
+        task = task_analyzer.analyze(text)
+        assert task_analyzer.is_chitchat(text, task), f"{text!r} should be recognized as chitchat"
+
+
+def test_terse_real_task_is_never_treated_as_chitchat():
+    # The detector must be conservative: a real one-line request with no
+    # verb keyword at all ("the login is broken") must never be blocked --
+    # only text that ALSO superficially reads as small talk should be.
+    for text in [
+        "the login is broken", "app.py is throwing an error", "hey fix app.py",
+        "hey, can you add a health check endpoint",
+    ]:
+        task = task_analyzer.analyze(text)
+        assert not task_analyzer.is_chitchat(text, task), f"{text!r} should NOT be treated as chitchat"
+
+
+def test_empty_request_is_treated_as_chitchat():
+    task = task_analyzer.analyze("")
+    assert task_analyzer.is_chitchat("", task)

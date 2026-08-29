@@ -34,3 +34,18 @@ def test_plan_computes_forecast_and_fingerprint(tmp_path):
     result = plan("Fix a small validation bug", str(tmp_path), CONFIG)
     assert result.forecast is not None
     assert result.fingerprint.key()
+
+
+def test_plan_blocks_chitchat_before_any_claude_call(tmp_path):
+    # Regression: a plain greeting typed into the interactive REPL scored as
+    # a valid low-difficulty DIRECT task instead of being recognized as not
+    # a coding request at all -- this must be caught in plan() itself, which
+    # never calls Claude, so run() can short-circuit for free (see
+    # _blocked_report in engine.py).
+    result = plan("hey how are you", str(tmp_path), CONFIG)
+    assert result.blocked_reason is not None
+
+
+def test_plan_does_not_block_a_terse_real_task(tmp_path):
+    result = plan("the login is broken", str(tmp_path), CONFIG)
+    assert result.blocked_reason is None

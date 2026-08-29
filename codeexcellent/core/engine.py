@@ -108,6 +108,22 @@ def plan(request: str, root: str, config: dict, on_step: StepCallback | None = N
     on_step("Analyzing task...")
     task = task_analyzer.analyze(request)
 
+    if task_analyzer.is_chitchat(request, task):
+        on_step("BLOCKED: doesn't look like a coding task")
+        reason = (
+            "That doesn't look like a coding task. Describe what you want changed, "
+            "e.g. \"add input validation to the signup form\" or \"fix the login bug\"."
+        )
+        empty_repo = repository.analyze(root, config)
+        empty_difficulty = difficulty_scorer.score(task, empty_repo, config)
+        empty_budget = budget_manager.allocate(empty_difficulty, config)
+        return PlanResult(
+            task=task, repo=empty_repo, difficulty=empty_difficulty, budget=empty_budget,
+            fingerprint=fingerprint.build(task, empty_repo, empty_difficulty),
+            forecast=resource_forecaster.forecast("blocked", root, empty_budget, 0, config),
+            blocked_reason=reason,
+        )
+
     on_step("Inspecting repository...")
     repo = repository.analyze(root, config)
 

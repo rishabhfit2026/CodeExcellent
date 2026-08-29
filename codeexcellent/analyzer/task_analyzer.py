@@ -97,6 +97,41 @@ def _count_distinct_modules(text: str) -> int:
     return len(core_stems)
 
 
+# A cheap pre-flight guard against spending a real Claude call on input that
+# was never a coding task to begin with -- found via dogfooding: typing a
+# plain greeting into the interactive REPL ("hey how are you") scored as a
+# low-difficulty DIRECT task, spent a real call trying to "implement" it,
+# and reported a confusing INCOMPLETE failure for a request that was never
+# asking for a code change. Deliberately narrow: matched only when NOTHING
+# in the heuristic analysis suggests an actionable task (no verb/arch/risk/
+# test/ambiguity keyword, no file reference) AND the text itself reads as
+# conversational -- so a real terse request with no verb keyword ("the
+# login is broken") is never caught, only text that also superficially
+# reads as small talk is.
+_CHITCHAT_PATTERNS = re.compile(
+    r"^(hey|hi|hello|yo+|sup|hiya|howdy)\b"
+    r"|\bhow('?s| is| are) (it|you|things|everything) (going|doing)?\b"
+    r"|\bwhat'?s up\b"
+    r"|^who are you\??$"
+    r"|^what (are|can) you (do|help with)\??$"
+    r"|^(thanks|thank you|thx|ty|cheers)\b"
+    r"|^(ok|okay|cool|nice|great|lol|haha|got it)(\s+(ok|okay|cool|nice|great))?\.?!?$"
+    r"|^(bye|goodbye|see ya|see you|later)\b",
+    re.IGNORECASE,
+)
+
+
+def is_chitchat(request: str, task: TaskAnalysis) -> bool:
+    text = request.lower().strip()
+    if not text:
+        return True
+    if task.category != "general" or task.keywords_matched:
+        return False
+    if _FILE_REF_PATTERN.search(text):
+        return False
+    return bool(_CHITCHAT_PATTERNS.search(text))
+
+
 def analyze(request: str) -> TaskAnalysis:
     text = request.lower().strip()
     word_count = len(text.split())
