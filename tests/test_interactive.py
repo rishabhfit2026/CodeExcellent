@@ -51,9 +51,9 @@ def test_interactive_shows_startup_banner(capsys, monkeypatch):
 
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "CodeExcellent v" in out
-    assert "Repository:" in out
-    assert "Claude CLI: ✓" in out
+    assert "CodeExcellent" in out and "v" in out
+    assert "Repository" in out
+    assert "Claude CLI" in out and "ready" in out
     assert 'Type a task, or "exit" to quit.' in out
 
 
@@ -88,15 +88,25 @@ def test_interactive_runs_a_task_with_concise_output(capsys, monkeypatch):
 
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "Difficulty:" in out
-    assert "Strategy:" in out
-    assert "Implementing..." in out
+    assert "difficulty" in out
+    assert "strategy" in out
     assert "Task completed" in out
-    assert "Quality:" in out
+    assert "quality" in out
     # Conciseness: the interactive loop must NOT dump the full one-shot
     # `analyze`/`run` report sections for every turn.
     assert "Resource forecast" not in out
     assert "Max Claude calls:" not in out
+
+
+def test_interactive_step_maps_engine_messages_to_short_progress_phrases():
+    # The spinner text itself is transient (live-updating, cleared once the
+    # task finishes) so it isn't present in captured final output -- this
+    # tests the mapping function directly instead.
+    assert cli_main._interactive_step("Calling Claude (attempt 1, effort=medium)...") == "Implementing..."
+    assert cli_main._interactive_step("Calling Claude (attempt 2, effort=medium)...") == "Retrying..."
+    assert cli_main._interactive_step("Running tests...") == "Testing..."
+    assert cli_main._interactive_step("Running quality review...") == "Reviewing..."
+    assert cli_main._interactive_step("Difficulty 4.0/10 (medium)...") is None
 
 
 def test_interactive_blocked_task_does_not_crash_the_loop(capsys, monkeypatch, tmp_path):

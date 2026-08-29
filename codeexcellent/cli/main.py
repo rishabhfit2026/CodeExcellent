@@ -5,6 +5,10 @@ import os
 import sys
 from pathlib import Path
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+
 from codeexcellent import __version__
 from codeexcellent.claude.claude_engine import ClaudeRunner
 from codeexcellent.config.settings import load_config
@@ -21,6 +25,23 @@ _MODE_LABELS = {
     ExecutionMode.FULL: "Full planning + review",
     ExecutionMode.REVIEW_REQUIRED: "Direct + mandatory review",
 }
+
+_RISK_STYLES = {
+    "low": "green",
+    "medium": "yellow",
+    "high": "dark_orange",
+    "critical": "bold red",
+}
+
+# The presentation layer's one deliberate exception to the "near-stdlib"
+# architecture principle (README) -- confined entirely to this module.
+# Rich degrades to plain text automatically when stdout/stderr isn't a real
+# terminal (piped/redirected), so scripted use is unaffected. Two consoles,
+# not one, so error/warning output still goes to stderr like the plain-print
+# version did -- `console.print()` defaults to stdout, which would otherwise
+# silently merge error text into piped stdout.
+console = Console()
+err_console = Console(stderr=True)
 
 
 def _print_header(title: str) -> None:
@@ -126,59 +147,75 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_doctor(rows: list[tuple[bool | None, str, str, str | None]]) -> None:
+    body = Text()
+    for i, (status, label, detail, fix) in enumerate(rows):
+        if i:
+            body.append("\n")
+        icon, style = ("✓", "green") if status is True else ("✗", "bold red") if status is False else ("?", "yellow")
+        body.append(f"{icon} ", style=style)
+        body.append(f"{label:<20}", style="bold")
+        if detail:
+            body.append(f" {detail}", style="red" if status is False else "dim")
+        if fix:
+            body.append(f"\n  → {fix}", style="yellow")
+    console.print(Panel(body, title="[bold]Environment check[/bold]", title_align="left", border_style="cyan", padding=(1, 2)))
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     import json
     import shutil as _shutil
 
     ok = True
+    rows: list[tuple[bool | None, str, str, str | None]] = []
 
     try:
         config = load_config()
-        print("Configuration: OK -- loaded and merged successfully")
+        rows.append((True, "Configuration", "loaded and merged successfully", None))
     except (json.JSONDecodeError, OSError) as exc:
-        print(f"Configuration: INVALID -- {exc}")
-        print("  Fix: check the JSON syntax in your ~/.codeexcellent/config.json (or $CODEEXCELLENT_CONFIG).")
+        rows.append((False, "Configuration", str(exc), "check the JSON syntax in your ~/.codeexcellent/config.json (or $CODEEXCELLENT_CONFIG)"))
+        _render_doctor(rows)
         return 1
 
     engine = ClaudeRunner(config)
     available, detail = engine.is_available()
-    print(f"Claude CLI: {'OK' if available else 'MISSING'} -- {detail}")
+    rows.append((available, "Claude CLI", detail, None if available else "install Claude Code and ensure 'claude' is on PATH (https://claude.com/claude-code)"))
     if not available:
-        print("  Fix: install Claude Code and ensure 'claude' is on PATH (https://claude.com/claude-code).")
         ok = False
     else:
         auth = engine.auth_status()
         if auth is None:
-            print("Claude auth: UNKNOWN -- could not read `claude auth status`")
+            rows.append((None, "Claude auth", "could not read `claude auth status`", None))
         elif auth.get("loggedIn"):
-            print(f"Claude auth: OK -- logged in ({auth.get('subscriptionType', 'unknown plan')})")
+            rows.append((True, "Claude auth", f"logged in ({auth.get('subscriptionType', 'unknown plan')})", None))
         else:
-            print("Claude auth: NOT LOGGED IN")
-            print("  Fix: run `claude auth login`.")
+            rows.append((False, "Claude auth", "not logged in", "run `claude auth login`"))
             ok = False
 
-    print(f"Python: {sys.version.split()[0]}")
+    rows.append((True, "Python", sys.version.split()[0], None))
 
     git_path = _shutil.which("git")
-    print(f"Git: {'OK -- ' + git_path if git_path else 'MISSING'}")
-    if not git_path:
-        print("  Note: CodeExcellent still works without git, but loses change-isolation and dirty-state warnings.")
+    rows.append((bool(git_path), "Git", git_path or "not found", None if git_path else "CodeExcellent still works without git, but loses change-isolation and dirty-state warnings"))
 
     root = str(Path(args.root).resolve())
     repo = repository.analyze(root, config)
-    print(f"Target directory: {root}")
-    print(f"Git repository: {'yes (' + repo.git_branch + ')' if repo.has_git and repo.git_branch else ('yes' if repo.has_git else 'no')}")
-    print(f"Detected project types: {', '.join(repo.project_types) or 'none'}")
-    print(f"Detected test locations: {', '.join(repo.test_dirs) or 'none'}")
+    rows.append((True, "Target directory", root, None))
+    if repo.has_git:
+        rows.append((True, "Git repository", f"yes ({repo.git_branch})" if repo.git_branch else "yes", None))
+    else:
+        rows.append((None, "Git repository", "no", None))
+    rows.append((True, "Project types", ", ".join(repo.project_types) or "none", None))
+    rows.append((True, "Test locations", ", ".join(repo.test_dirs) or "none", None))
 
     try:
         db_path = memory.db_path(root)
         memory.recent(root, limit=1)
-        print(f"History database: OK -- {db_path}")
+        rows.append((True, "History database", str(db_path), None))
     except OSError as exc:
-        print(f"History database: INACCESSIBLE -- {exc}")
+        rows.append((False, "History database", str(exc), None))
         ok = False
 
+    _render_doctor(rows)
     return 0 if ok else 1
 
 
@@ -339,11 +376,24 @@ def _print_startup_banner(root: str, config: dict, engine: ClaudeRunner) -> None
     repo = repository.analyze(root, config)
     repo_label = Path(root).name or root
 
-    print(f"{_BANNER} v{__version__}")
-    print(f"Repository: {repo_label}")
-    print(f"Claude CLI: {_mark(available)}")
-    print(f"Git: {_mark(repo.has_git)}" + (f" ({repo.git_branch})" if repo.has_git and repo.git_branch else ""))
-    print('\nType a task, or "exit" to quit.\n')
+    body = Text()
+    body.append("Repository  ", style="dim")
+    body.append(f"{repo_label}\n", style="bold")
+    body.append("Claude CLI  ", style="dim")
+    body.append("● ready\n" if available else "● unavailable\n", style="green" if available else "bold red")
+    body.append("Git         ", style="dim")
+    if repo.has_git and repo.git_branch:
+        body.append(f"● {repo.git_branch}", style="green")
+    elif repo.has_git:
+        body.append("● tracked", style="green")
+    else:
+        body.append("○ not a repository", style="yellow")
+
+    console.print(Panel(
+        body, title=f"[bold]{_BANNER}[/bold] [dim]v{__version__}[/dim]",
+        title_align="left", border_style="cyan", padding=(1, 2), width=min(console.width, 64),
+    ))
+    console.print('[dim]Type a task, or "exit" to quit.[/dim]\n')
 
 
 def _print_compact_plan(planned: PlanResult) -> None:
@@ -353,8 +403,19 @@ def _print_compact_plan(planned: PlanResult) -> None:
     print. Full detail is always available via `codeexcellent analyze`.
     """
     difficulty = planned.difficulty
-    print(f"Difficulty: {difficulty.value}/10  Risk: {difficulty.risk_level.value.upper()}  Confidence: {difficulty.confidence}")
-    print(f"Strategy: {_MODE_LABELS.get(difficulty.mode, difficulty.mode.value)}")
+    risk = difficulty.risk_level.value
+    risk_style = _RISK_STYLES.get(risk, "white")
+
+    line = Text()
+    line.append("difficulty ", style="dim")
+    line.append(f"{difficulty.value}/10", style="bold")
+    line.append("   risk ", style="dim")
+    line.append(risk.upper(), style=risk_style)
+    line.append("   confidence ", style="dim")
+    line.append(f"{difficulty.confidence}", style="bold")
+    line.append("   strategy ", style="dim")
+    line.append(_MODE_LABELS.get(difficulty.mode, difficulty.mode.value), style="cyan")
+    console.print(line)
 
 
 def _interactive_step(msg: str) -> str | None:
@@ -377,18 +438,29 @@ def _interactive_step(msg: str) -> str | None:
 
 def _print_compact_result(report: ExecutionReport) -> None:
     if report.status == "COMPLETE":
-        print(f"\n{_mark(True)} Task completed")
+        icon, style, label = "✓", "bold green", "Task completed"
     elif report.status == "CANCELLED":
-        print(f"\n{_mark(False)} Cancelled")
+        icon, style, label = "✗", "yellow", "Cancelled"
     else:
-        print(f"\n{_mark(False)} Task {report.status.lower()}")
+        icon, style, label = "✗", "bold red", f"Task {report.status.lower()}"
 
     quality = f"{report.final_quality.score}/10" if report.final_quality else "n/a"
     files = len(report.files_changed)
-    print(f"Quality: {quality} | Files changed: {files} | Cost: ${report.total_cost_usd}")
+
+    body = Text()
+    body.append(f"{icon} {label}\n\n", style=style)
+    body.append("quality ", style="dim")
+    body.append(f"{quality}", style="bold")
+    body.append("   files changed ", style="dim")
+    body.append(f"{files}", style="bold")
+    body.append("   cost ", style="dim")
+    body.append(f"${report.total_cost_usd}", style="bold")
     if report.final_quality and report.final_quality.issues:
         for issue in report.final_quality.issues[:3]:
-            print(f"  - {issue}")
+            body.append(f"\n  • {issue}", style="dim")
+
+    border = style.replace("bold ", "")
+    console.print(Panel(body, border_style=border, padding=(0, 2), width=min(console.width, 72)))
 
 
 def _interactive() -> int:
@@ -399,35 +471,39 @@ def _interactive() -> int:
 
     available, detail = engine.is_available()
     if not available:
-        print(f"Claude CLI is not available: {detail}", file=sys.stderr)
-        print("Run `codeexcellent doctor` for details.", file=sys.stderr)
+        err_console.print(f"[bold red]Claude CLI is not available:[/bold red] {detail}")
+        err_console.print("Run [bold]codeexcellent doctor[/bold] for details.")
         return 1
 
     while True:
         try:
-            prompt = input("> ").strip()
+            console.print("[bold cyan]❯[/bold cyan] ", end="")
+            prompt = input().strip()
         except (EOFError, KeyboardInterrupt):
-            print()
+            console.print()
             return 0
         if not prompt or prompt.lower() in ("exit", "quit"):
             return 0
 
-        planned = plan_task(prompt, root, config)
+        with console.status("[cyan]Analyzing task...[/cyan]", spinner="dots"):
+            planned = plan_task(prompt, root, config)
         if planned.blocked_reason:
-            print(f"Blocked: {planned.blocked_reason}\n")
+            console.print(f"[bold red]Blocked:[/bold red] {planned.blocked_reason}\n")
             continue
 
         _print_compact_plan(planned)
-        print()
+        console.print()
 
-        def _on_step(msg: str) -> None:
-            shown = _interactive_step(msg)
-            if shown:
-                print(f"{shown}")
+        with console.status("[cyan]Working...[/cyan]", spinner="dots") as status:
+            def _on_step(msg: str) -> None:
+                shown = _interactive_step(msg)
+                if shown:
+                    status.update(f"[cyan]{shown}[/cyan]")
 
-        report = run_engine(prompt, root, config, engine, on_step=_on_step, planned=planned)
+            report = run_engine(prompt, root, config, engine, on_step=_on_step, planned=planned)
+
         _print_compact_result(report)
-        print()
+        console.print()
 
 
 def build_parser() -> argparse.ArgumentParser:

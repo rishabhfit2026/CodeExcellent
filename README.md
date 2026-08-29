@@ -25,12 +25,15 @@ Task → estimate difficulty (heuristic + history) → forecast resources
 
 ## Why this architecture
 
-- **Python 3.10+, stdlib only.** No web framework, no ORM, no ML library, no
-  third-party CLI toolkit. The whole system is: parse text, score it, shell
-  out to a CLI, read JSON back, run tests, write SQLite rows. Anything
-  heavier would be optimizing for the wrong thing given the actual problem
-  size — the "adaptive" layer is a transparent statistical blend over real
-  history, not machine learning, by design (see [Adaptive estimation](#adaptive-estimation-prediction-vs-reality)).
+- **Python 3.10+, near-stdlib.** No web framework, no ORM, no ML library. The
+  one deliberate exception is [`rich`](https://github.com/Textualize/rich),
+  used only in the terminal presentation layer (`cli/main.py`) for the
+  interactive session's colors, spinner, and panels — it never touches
+  analysis, scoring, or orchestration. Everything else is: parse text, score
+  it, shell out to a CLI, read JSON back, run tests, write SQLite rows.
+  Anything heavier there would be optimizing for the wrong thing given the
+  actual problem size — the "adaptive" layer is a transparent statistical
+  blend over real history, not machine learning, by design (see [Adaptive estimation](#adaptive-estimation-prediction-vs-reality)).
 - **One package per pipeline stage** (`analyzer/`, `budget/`, `claude/`,
   `quality/`, `core/`, `benchmark/`), each independently unit-testable
   against the dataclasses in `core/models.py`. `core/engine.py` is the only
