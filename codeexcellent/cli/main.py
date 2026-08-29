@@ -416,7 +416,7 @@ def _print_startup_banner(root: str, config: dict, engine: ClaudeRunner) -> None
         body, title=f"[bold]{_BANNER}[/bold] [dim]v{__version__}[/dim]",
         title_align="left", border_style="cyan", padding=(1, 2), width=min(console.width, 64),
     ))
-    console.print('[dim]Type a task, or "exit" to quit.[/dim]\n')
+    console.print('[dim]Type a task, [/dim][bold]/help[/bold][dim] for commands, or "exit" to quit.[/dim]\n')
 
 
 def _print_compact_plan(planned: PlanResult) -> None:
@@ -486,6 +486,90 @@ def _print_compact_result(report: ExecutionReport) -> None:
     console.print(Panel(body, border_style=border, padding=(0, 2), width=min(console.width, 72)))
 
 
+_SLASH_COMMANDS = {
+    "/help": "Show this list of commands",
+    "/doctor": "Check environment health without leaving the session",
+    "/loop": 'Keep retrying a task until it\'s done, under a much higher ceiling -- usage: "/loop <task>"',
+}
+
+
+def _print_slash_menu() -> None:
+    body = Text()
+    for i, (cmd, desc) in enumerate(_SLASH_COMMANDS.items()):
+        if i:
+            body.append("\n")
+        body.append(f"{cmd:<10}", style="bold cyan")
+        body.append(desc, style="dim")
+    body.append("\n\n")
+    body.append("exit / quit", style="bold cyan")
+    body.append("  End the session", style="dim")
+    console.print(Panel(body, title="[bold]Commands[/bold]", title_align="left", border_style="cyan", padding=(1, 2)))
+
+
+def _run_task_in_session(prompt: str, root: str, config: dict, engine: ClaudeRunner, *, loop: bool = False) -> None:
+    """Shared by plain task input and `/loop <task>` -- the only difference
+    is which budget the plan runs under.
+    """
+    with console.status("[cyan]Analyzing task...[/cyan]", spinner="dots"):
+        planned = plan_task(prompt, root, config)
+    if planned.blocked_reason:
+        console.print(f"[bold red]Blocked:[/bold red] {planned.blocked_reason}\n")
+        return
+
+    if loop:
+        from codeexcellent.budget import budget_manager
+
+        planned.budget = budget_manager.allocate_loop(config)
+
+    _print_compact_plan(planned)
+    if loop:
+        console.print("[dim]looping until done or the ceiling above is hit[/dim]")
+    console.print()
+
+    with console.status("[cyan]Working...[/cyan]", spinner="dots") as status:
+        def _on_step(msg: str) -> None:
+            shown = _interactive_step(msg)
+            if shown:
+                status.update(f"[cyan]{shown}[/cyan]")
+
+        report = run_engine(prompt, root, config, engine, on_step=_on_step, planned=planned)
+
+    _print_compact_result(report)
+    console.print()
+
+
+def _handle_slash_command(line: str, root: str, config: dict, engine: ClaudeRunner) -> bool:
+    """Returns True if `line` was a recognized slash command (handled here,
+    the main loop should just continue) -- False if it wasn't one at all,
+    in which case the caller treats it as a normal task.
+    """
+    if not line.startswith("/"):
+        return False
+
+    command, _, rest = line.partition(" ")
+    command = command.lower()
+    rest = rest.strip()
+
+    if command in ("/help", "/"):
+        _print_slash_menu()
+        return True
+
+    if command == "/doctor":
+        cmd_doctor(argparse.Namespace(root=root))
+        console.print()
+        return True
+
+    if command == "/loop":
+        if not rest:
+            console.print('[yellow]Usage:[/yellow] /loop <task description>\n')
+            return True
+        _run_task_in_session(rest, root, config, engine, loop=True)
+        return True
+
+    console.print(f"[yellow]Unknown command[/yellow] {command} -- type [bold]/help[/bold] for a list.\n")
+    return True
+
+
 def _interactive() -> int:
     root = str(Path.cwd())
     config = load_config()
@@ -508,25 +592,10 @@ def _interactive() -> int:
         if not prompt or prompt.lower() in ("exit", "quit"):
             return 0
 
-        with console.status("[cyan]Analyzing task...[/cyan]", spinner="dots"):
-            planned = plan_task(prompt, root, config)
-        if planned.blocked_reason:
-            console.print(f"[bold red]Blocked:[/bold red] {planned.blocked_reason}\n")
+        if _handle_slash_command(prompt, root, config, engine):
             continue
 
-        _print_compact_plan(planned)
-        console.print()
-
-        with console.status("[cyan]Working...[/cyan]", spinner="dots") as status:
-            def _on_step(msg: str) -> None:
-                shown = _interactive_step(msg)
-                if shown:
-                    status.update(f"[cyan]{shown}[/cyan]")
-
-            report = run_engine(prompt, root, config, engine, on_step=_on_step, planned=planned)
-
-        _print_compact_result(report)
-        console.print()
+        _run_task_in_session(prompt, root, config, engine)
 
 
 def build_parser() -> argparse.ArgumentParser:

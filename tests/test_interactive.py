@@ -54,7 +54,7 @@ def test_interactive_shows_startup_banner(capsys, monkeypatch):
     assert "CodeExcellent" in out and "v" in out
     assert "Repository" in out
     assert "Claude CLI" in out and "ready" in out
-    assert 'Type a task, or "exit" to quit.' in out
+    assert "Type a task" in out and "/help" in out
 
 
 def test_interactive_reports_missing_claude_cli(capsys, monkeypatch):
@@ -121,3 +121,72 @@ def test_interactive_blocked_task_does_not_crash_the_loop(capsys, monkeypatch, t
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "Blocked:" in out
+
+
+def test_slash_help_shows_the_command_menu_without_treating_it_as_a_task(capsys, monkeypatch):
+    monkeypatch.setattr(cli_main, "ClaudeRunner", lambda config: _StubEngine())
+    with patch("builtins.input", side_effect=["/help", "exit"]):
+        exit_code = cli_main.main([])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "/doctor" in out
+    assert "/loop" in out
+    # Must not have gone through the task-analysis path at all.
+    assert "difficulty" not in out
+
+
+def test_slash_doctor_runs_inline_without_leaving_the_session(capsys, monkeypatch):
+    monkeypatch.setattr(cli_main, "ClaudeRunner", lambda config: _StubEngine())
+    with patch("builtins.input", side_effect=["/doctor", "exit"]):
+        exit_code = cli_main.main([])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Environment check" in out
+    assert "Claude CLI" in out
+
+
+def test_slash_loop_without_a_task_shows_usage_and_does_not_run_anything(capsys, monkeypatch):
+    monkeypatch.setattr(cli_main, "ClaudeRunner", lambda config: _StubEngine())
+    with patch("builtins.input", side_effect=["/loop", "exit"]):
+        exit_code = cli_main.main([])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Usage:" in out
+    assert "difficulty" not in out
+
+
+def test_slash_loop_runs_the_task_under_the_loop_budget(capsys, monkeypatch):
+    from codeexcellent.budget import budget_manager
+    from codeexcellent.config.settings import load_config
+
+    monkeypatch.setattr(cli_main, "ClaudeRunner", lambda config: _StubEngine())
+
+    captured = {}
+    real_run_engine = cli_main.run_engine
+
+    def _spy(request, root, config, engine, on_step=None, planned=None):
+        captured["planned"] = planned
+        return real_run_engine(request, root, config, engine, on_step=on_step, planned=planned)
+
+    monkeypatch.setattr(cli_main, "run_engine", _spy)
+
+    with patch("builtins.input", side_effect=["/loop rename nam to name in app.py", "exit"]):
+        exit_code = cli_main.main([])
+
+    assert exit_code == 0
+    loop_budget = budget_manager.allocate_loop(load_config())
+    assert captured["planned"].budget.max_claude_calls == loop_budget.max_claude_calls
+    assert captured["planned"].budget.band == "loop"
+
+
+def test_unknown_slash_command_shows_a_hint_and_does_not_crash(capsys, monkeypatch):
+    monkeypatch.setattr(cli_main, "ClaudeRunner", lambda config: _StubEngine())
+    with patch("builtins.input", side_effect=["/nonsense", "exit"]):
+        exit_code = cli_main.main([])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Unknown command" in out
