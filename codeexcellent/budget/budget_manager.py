@@ -61,6 +61,31 @@ def allocate_adaptive(difficulty: DifficultyScore, config: dict) -> Budget:
     )
 
 
+def allocate_loop(config: dict) -> Budget:
+    """A much higher, still-finite ceiling for `codeexcellent run --loop`: a
+    single prompt that should keep going (implement, test, retry with
+    feedback) until the task's own validation says done, rather than
+    stopping at the difficulty band's normal 1-8 call budget. Independent of
+    difficulty band on purpose -- loop mode's whole point is to keep working
+    on a large/ambiguous request regardless of what the heuristic scorer
+    estimated, not to be scaled down by it. Still finite (see
+    config['loop_mode']) so a task that genuinely never converges stops
+    instead of spending indefinitely.
+    """
+    spec = config.get("loop_mode", {})
+    max_claude_calls = int(spec.get("max_claude_calls", 40))
+    max_retries = min(int(spec.get("max_retries", max_claude_calls - 1)), max(0, max_claude_calls - 1))
+    return Budget(
+        band="loop",
+        effort=spec.get("effort", "max"),
+        max_budget_usd=float(spec.get("max_budget_usd", 15.0)),
+        max_budget_usd_step=float(spec.get("max_budget_usd_step", 5.0)),
+        max_claude_calls=max_claude_calls,
+        max_retries=max_retries,
+        timeout_seconds=int(spec.get("timeout_seconds", 1800)),
+    )
+
+
 def escalate(budget: Budget, config: dict) -> Budget:
     """Progressive allocation (section 13): step up to the next budget band
     rather than handing out the maximum from the start. Used by the retry

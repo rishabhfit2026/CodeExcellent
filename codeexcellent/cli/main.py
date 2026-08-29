@@ -49,8 +49,8 @@ def _print_header(title: str) -> None:
     print("-" * max(24, len(title)))
 
 
-def _analysis_report(request: str, root: str, config: dict) -> PlanResult:
-    planned = plan_task(request, root, config)
+def _analysis_report(request: str, root: str, config: dict, planned: PlanResult | None = None) -> PlanResult:
+    planned = planned if planned is not None else plan_task(request, root, config)
     difficulty, budget, forecast = planned.difficulty, planned.budget, planned.forecast
 
     print(_BANNER)
@@ -130,12 +130,35 @@ def cmd_run(args: argparse.Namespace) -> int:
             print("Aborted.")
             return 1
 
-    planned = _analysis_report(args.prompt, root, config)
+    planned = plan_task(args.prompt, root, config)
+    if not planned.blocked_reason and args.loop:
+        from codeexcellent.budget import budget_manager
+
+        # Only the budget ceiling changes -- strategy selection stays exactly
+        # what the evidence-based selector already chose. Loop mode answers
+        # "how long may it keep retrying," not "how it should plan." Applied
+        # before printing so the Budget section below shows the real ceiling
+        # that will actually be used, not the difficulty band's default.
+        planned.budget = budget_manager.allocate_loop(config)
+
+    _analysis_report(args.prompt, root, config, planned=planned)
     if planned.blocked_reason:
         return 1
+
+    if args.loop:
+        print(
+            f"\nLoop mode: keeps retrying with feedback until the task's own validation "
+            f"says done, or the ceiling above is hit."
+        )
+        if not args.yes:
+            answer = input("Continue? [y/N] ").strip().lower()
+            if answer != "y":
+                print("Aborted.")
+                return 1
+
     print("\nStarting Claude...")
 
-    report = run_engine(args.prompt, root, config, engine, on_step=lambda msg: print(f"  {msg}"))
+    report = run_engine(args.prompt, root, config, engine, on_step=lambda msg: print(f"  {msg}"), planned=planned)
     _print_report(report)
     return 0 if report.status == "COMPLETE" else 2
 
@@ -518,7 +541,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run", help="Execute a coding task")
     run_parser.add_argument("prompt", help="The task to perform")
-    run_parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation about pre-existing uncommitted changes")
+    run_parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompts (dirty repo, loop mode cost)")
+    run_parser.add_argument(
+        "--loop", action="store_true",
+        help="Keep retrying with feedback under a much higher (but still finite) call/cost ceiling "
+             "until the task's own validation says done, instead of stopping at the normal "
+             "difficulty-band budget. For project-level asks, not quick fixes. See config['loop_mode'].",
+    )
     run_parser.set_defaults(func=cmd_run)
 
     analyze_parser = subparsers.add_parser("analyze", help="Show difficulty/budget analysis without executing")

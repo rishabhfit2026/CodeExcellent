@@ -36,6 +36,15 @@
     "hard": {"effort": "high", "max_budget_usd": 8.0, "max_budget_usd_step": 4.0, "max_claude_calls": 5, "max_retries": 2, "timeout_seconds": 900},
     "very_hard": {"effort": "max", "max_budget_usd": 20.0, "max_budget_usd_step": 8.0, "max_claude_calls": 8, "max_retries": 3, "timeout_seconds": 1800}
   },
+  "loop_mode": {
+    "_comment": "codeexcellent run \"...\" --loop: a much higher, still-finite ceiling for a single prompt that should keep going (plan, implement, test, retry with feedback) until the task's own validation says done, instead of stopping at the difficulty band's normal 1-8 call budget. Override any of these in your own config to raise/lower the ceiling.",
+    "effort": "max",
+    "max_budget_usd": 15.0,
+    "max_budget_usd_step": 5.0,
+    "max_claude_calls": 40,
+    "max_retries": 39,
+    "timeout_seconds": 1800
+  },
   "quality": {
     "min_pass_score": 7.0,
     "min_pass_score_by_level": {

@@ -53,3 +53,29 @@ def test_escalate_at_top_band_increases_usd_only():
     escalated = budget_manager.escalate(budget, CONFIG)
     assert escalated.band == "very_hard"
     assert escalated.max_budget_usd > budget.max_budget_usd
+
+
+def test_allocate_loop_gives_a_much_higher_but_still_finite_ceiling():
+    # --loop mode's whole point: far more room than any single difficulty
+    # band's normal 1-8 call budget, but never truly unbounded -- a stuck
+    # task must still stop eventually rather than spend indefinitely.
+    loop_budget = budget_manager.allocate_loop(CONFIG)
+    very_hard_budget = budget_manager.allocate(
+        DifficultyScore(
+            value=9.0, band="very_hard", risk_level=RiskLevel.LOW, dimensions={},
+            planning_required=True, testing_required=True, mode=ExecutionMode.FULL,
+            estimated_scope="large",
+        ),
+        CONFIG,
+    )
+    assert loop_budget.max_claude_calls > very_hard_budget.max_claude_calls
+    assert loop_budget.max_retries == loop_budget.max_claude_calls - 1
+    assert 0 < loop_budget.max_budget_usd < float("inf")
+
+
+def test_allocate_loop_respects_a_user_override():
+    custom_config = {**CONFIG, "loop_mode": {**CONFIG["loop_mode"], "max_claude_calls": 5, "max_budget_usd": 2.0}}
+    budget = budget_manager.allocate_loop(custom_config)
+    assert budget.max_claude_calls == 5
+    assert budget.max_retries == 4
+    assert budget.max_budget_usd == 2.0
